@@ -1,13 +1,46 @@
+# Entorno virtual
 .env
-__pycache__/
-*.pyc
 .venv/
 venv/
+venv_CineMatch/
 
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Variables de entorno / credenciales
+.env.*
+!.env.example
+
+# Datos generados
 data/bronze/*
 data/silver/*
 data/gold/*
-models/trained/*
-logs/*
 
+# Modelos entrenados
+models/trained/*
+*.pkl
+*.joblib
+
+# Logs
+logs/*
+*.log
+
+# Cachés
+.cache/
+.pytest_cache/
+.mypy_cache/
+
+# VS Code
+.vscode/
+
+# Archivos del sistema
+.DS_Store
+Thumbs.db
+
+# Mantener archivos .gitkeep
 !.gitkeep
