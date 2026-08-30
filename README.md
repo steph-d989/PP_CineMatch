@@ -21,6 +21,7 @@ CineMatch busca reducir el tiempo que los usuarios dedican a explorar catálogos
 * Exploración de películas y series.
 * Búsqueda por título, género, actor o director.
 * Visualización de sinopsis, reparto, calificación y popularidad.
+* Resumen de peliculas (Duración max. 10 minutos)
 * Consulta de plataformas de streaming disponibles.
 * Registro de películas vistas.
 * Sistema de favoritos y lista para ver.
