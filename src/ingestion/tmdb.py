@@ -8,6 +8,11 @@ import pandas as pd
 import requests
 from dotenv import load_dotenv
 
+from src.validation.data_quality import (
+    validate_file_exists,
+    validate_json_file,
+)
+
 from src.utils.paths import (
     PROJECT_ROOT,
     BRONZE_TMDB_DIR,
@@ -15,9 +20,6 @@ from src.utils.paths import (
 
 from src.utils.config import TMDB_BASE_URL
 from src.utils.movie_ids import load_tmdb_ids_from_movielens
-
-
-TMDB_BASE_URL = "https://api.themoviedb.org/3/movie"
 
 
 ### FUNCIÓN PARA LEER CREDENCIALES
@@ -194,6 +196,26 @@ def validate_tmdb() -> dict:
 
     for archivo in archivos:
 
+        existe = validate_file_exists(archivo)
+
+        if not existe:
+            invalidos.append({
+                "archivo": archivo.name,
+                "error": "file_not_found",
+            })
+            continue
+
+        resultado_json = validate_json_file(archivo)
+
+        if not resultado_json["valid"]:
+            invalidos.append({
+                "archivo": archivo.name,
+                "error": resultado_json.get("error"),
+            })
+            continue
+
+        # Validación específica de TMDb:
+        # la respuesta debe ser un objeto JSON con un id.
         try:
             with open(
                 archivo,
@@ -205,10 +227,16 @@ def validate_tmdb() -> dict:
             if isinstance(data, dict) and data.get("id"):
                 validos += 1
             else:
-                invalidos.append(archivo.name)
+                invalidos.append({
+                    "archivo": archivo.name,
+                    "error": "invalid_tmdb_structure",
+                })
 
-        except Exception:
-            invalidos.append(archivo.name)
+        except Exception as error:
+            invalidos.append({
+                "archivo": archivo.name,
+                "error": str(error),
+            })
 
     return {
         "archivos_totales": len(archivos),
@@ -239,6 +267,9 @@ def save_tmdb_metadata(
         "archivos_invalidos": len(
             resultado_validacion["archivos_invalidos"]
         ),
+        "detalle_invalidos": resultado_validacion[
+            "archivos_invalidos"
+        ],
         "estado": (
             "success"
             if len(resultado_extraccion["errores"]) == 0

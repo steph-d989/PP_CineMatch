@@ -8,6 +8,11 @@ import pandas as pd
 import requests
 from dotenv import load_dotenv
 
+from src.validation.data_quality import (
+    validate_file_exists,
+    validate_json_file,
+)
+
 from src.utils.paths import (
     PROJECT_ROOT,
     BRONZE_WATCHMODE_DIR,
@@ -38,9 +43,6 @@ def load_watchmode_api_key() -> str:
 ### FUCNION PARA  CONSULTAR EL ESTADO DE LA CUOTA DE WATCHMODE
 
 def get_watchmode_quota(api_key: str) -> dict:
-    """
-    Consulta el estado de la cuota disponible en Watchmode.
-    """
 
     headers = {
         "X-API-Key": api_key,
@@ -268,6 +270,24 @@ def validate_watchmode() -> dict:
 
     for archivo in archivos:
 
+        existe = validate_file_exists(archivo)
+
+        if not existe:
+            invalidos.append({
+                "archivo": archivo.name,
+                "error": "file_not_found",
+            })
+            continue
+
+        resultado_json = validate_json_file(archivo)
+
+        if not resultado_json["valid"]:
+            invalidos.append({
+                "archivo": archivo.name,
+                "error": resultado_json.get("error"),
+            })
+            continue
+
         try:
             with open(
                 archivo,
@@ -276,6 +296,8 @@ def validate_watchmode() -> dict:
             ) as f:
                 data = json.load(f)
 
+            # Regla específica de Watchmode:
+            # la respuesta debe ser una lista.
             if isinstance(data, list):
                 validos += 1
 
@@ -283,14 +305,16 @@ def validate_watchmode() -> dict:
                     vacios += 1
 
             else:
-                invalidos.append(
-                    archivo.name
-                )
+                invalidos.append({
+                    "archivo": archivo.name,
+                    "error": "invalid_watchmode_structure",
+                })
 
-        except Exception:
-            invalidos.append(
-                archivo.name
-            )
+        except Exception as error:
+            invalidos.append({
+                "archivo": archivo.name,
+                "error": str(error),
+            })
 
     return {
         "archivos_totales": len(archivos),
@@ -333,6 +357,9 @@ def save_watchmode_metadata(
         "archivos_invalidos": len(
             resultado_validacion["archivos_invalidos"]
         ),
+        "detalle_invalidos": resultado_validacion[
+            "archivos_invalidos"
+        ],
         "estado": (
             "success"
             if len(resultado_extraccion["errores"]) == 0

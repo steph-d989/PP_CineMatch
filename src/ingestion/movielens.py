@@ -5,11 +5,14 @@ from pathlib import Path
 
 import requests
 
+from src.validation.data_quality import (
+    validate_file_exists,
+    validate_csv_file,
+)
+
 from src.utils.paths import BRONZE_MOVIELENS_DIR
 
 from src.utils.config import MOVIELENS_URL
-
-MOVIELENS_URL = "https://files.grouplens.org/datasets/movielens/ml-32m.zip"
 
 ### FUNCION PARA DESCARGAR ARCHIVO ZIP DE MOVIELENS
 
@@ -90,25 +93,40 @@ def validate_movielens(
         "movies.csv",
         "ratings.csv",
         "tags.csv",
-        "links.csv"
+        "links.csv",
+        "genome-scores.csv",
+        "genome-tags.csv",
     ]
 
     resultado = {}
 
     for nombre in archivos_esperados:
-
         ruta = carpeta_dataset / nombre
 
-        resultado[nombre] = {
-            "existe": ruta.exists(),
-            "tamano_mb": (
-                round(
-                    ruta.stat().st_size / (1024 ** 2),
-                    2
-                )
-                if ruta.exists()
-                else None
+        existe = validate_file_exists(ruta)
+
+        if existe:
+            validacion_csv = validate_csv_file(ruta)
+
+            tamano_mb = round(
+                ruta.stat().st_size / (1024 ** 2),
+                2
             )
+        else:
+            validacion_csv = {
+                "valid": False,
+                "error": "file_not_found"
+            }
+
+            tamano_mb = None
+
+        resultado[nombre] = {
+            "existe": existe,
+            "csv_valido": validacion_csv["valid"],
+            "filas": validacion_csv.get("rows"),
+            "columnas": validacion_csv.get("columns"),
+            "tamano_mb": tamano_mb,
+            "error": validacion_csv.get("error"),
         }
 
     return resultado
@@ -120,8 +138,8 @@ def save_metadata(
     validacion: dict
 ) -> Path:
 
-    archivos_ok = all( #Comprueba que los archivos existan
-        info["existe"]
+    archivos_ok = all(
+        info["existe"] and info["csv_valido"]
         for info in validacion.values()
     )
 
@@ -192,11 +210,21 @@ def run_movielens_ingestion(
 
     for archivo, info in validacion.items():
 
+        estado = (
+            "OK"
+            if info["existe"] and info["csv_valido"]
+            else "ERROR"
+        )
+
         print(
             archivo,
             "->",
-            "OK" if info["existe"] else "FALTA",
+            estado,
             "|",
+            info["filas"],
+            "filas |",
+            info["columnas"],
+            "columnas |",
             info["tamano_mb"],
             "MB"
         )
