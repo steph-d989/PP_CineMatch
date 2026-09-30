@@ -10,7 +10,6 @@ from dotenv import load_dotenv
 
 from src.utils.paths import (
     PROJECT_ROOT,
-    BRONZE_MOVIELENS_DIR,
     BRONZE_TMDB_DIR,
 )
 
