@@ -7,6 +7,7 @@ import requests
 
 from src.utils.paths import BRONZE_MOVIELENS_DIR
 
+from src.utils.config import MOVIELENS_URL
 
 MOVIELENS_URL = "https://files.grouplens.org/datasets/movielens/ml-32m.zip"
 
