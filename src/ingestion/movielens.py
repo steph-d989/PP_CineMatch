@@ -10,53 +10,40 @@ from src.utils.paths import BRONZE_MOVIELENS_DIR
 
 MOVIELENS_URL = "https://files.grouplens.org/datasets/movielens/ml-32m.zip"
 
+### FUNCION PARA DESCARGAR ARCHIVO ZIP DE MOVIELENS
 
 def download_movielens(
-    url: str = MOVIELENS_URL,
-    force_download: bool = False
+    url: str = MOVIELENS_URL, #Desde donde descarga
+    force_download: bool = False #Indica si tenemos carpeta con el mismo nombre no volver a descargar
 ) -> Path:
-    """
-    Descarga MovieLens 32M en la capa Bronze.
 
-    Parameters
-    ----------
-    url : str
-        URL oficial del dataset.
-    force_download : bool
-        Si True, vuelve a descargar aunque el ZIP ya exista.
 
-    Returns
-    -------
-    Path
-        Ruta del archivo ZIP descargado.
-    """
-
-    BRONZE_MOVIELENS_DIR.mkdir(
-        parents=True,
-        exist_ok=True
+    BRONZE_MOVIELENS_DIR.mkdir( # Crea la carpeta bronze si no la tenemos
+        parents=True, # Permite crear carpetas padre si hace falta
+        exist_ok=True # Evita errores si la capeta ya existe
     )
 
-    ruta_zip = BRONZE_MOVIELENS_DIR / "ml-32m.zip"
+    ruta_zip = BRONZE_MOVIELENS_DIR / "ml-32m.zip" # Donde guardamos el ZIP
 
-    if ruta_zip.exists() and not force_download:
+    if ruta_zip.exists() and not force_download: # Si el ZIP existe no descargar
         print("MovieLens ya está descargado.")
         print("Ruta:", ruta_zip)
         return ruta_zip
 
     print("Descargando MovieLens 32M...")
 
-    with requests.get(
+    with requests.get( # Consulta URL
         url,
-        stream=True,
-        timeout=60
+        stream=True, # No carga todo el archivo en RAM de una sola vez
+        timeout=60 # Evita que una conexion congelada espere infinitamente
     ) as respuesta:
 
-        respuesta.raise_for_status()
+        respuesta.raise_for_status() # Si devuelve un error 404 500 503 ....
 
         with open(ruta_zip, "wb") as archivo:
 
             for bloque in respuesta.iter_content(
-                chunk_size=1024 * 1024
+                chunk_size=1024 * 1024  # Descarga el archivo por bloques de 1MB
             ):
                 if bloque:
                     archivo.write(bloque)
@@ -72,18 +59,11 @@ def extract_movielens(
     ruta_zip: Path,
     force_extract: bool = False
 ) -> Path:
-    """
-    Extrae MovieLens dentro de Bronze.
-
-    Returns
-    -------
-    Path
-        Carpeta donde quedaron los CSV.
-    """
 
     destino = BRONZE_MOVIELENS_DIR
     carpeta_dataset = destino / "ml-32m"
 
+    # Si los archivos ya fueron extraidos no lo vuleve a hacer 
     if carpeta_dataset.exists() and not force_extract:
         print("MovieLens ya está extraído.")
         print("Ruta:", carpeta_dataset)
@@ -99,15 +79,11 @@ def extract_movielens(
     return carpeta_dataset
 
 
-### FUNCIÓN DE VALIDACIÓN 
+### FUNCIÓN DE VALIDACIÓN, comprueba uqe se generaran los archivos que esperamos
 
 def validate_movielens(
     carpeta_dataset: Path
 ) -> dict:
-    """
-    Valida que existan los archivos principales
-    de MovieLens.
-    """
 
     archivos_esperados = [
         "movies.csv",
@@ -142,16 +118,13 @@ def validate_movielens(
 def save_metadata(
     validacion: dict
 ) -> Path:
-    """
-    Guarda metadata de la ingesta Bronze.
-    """
 
-    archivos_ok = all(
+    archivos_ok = all( #Comprueba que los archivos existan
         info["existe"]
         for info in validacion.values()
     )
 
-    metadata = {
+    metadata = { # Genera un diccionario con la informacion de la metadata
         "fuente": "MovieLens",
         "dataset": "ml-32m",
         "capa": "bronze",
@@ -194,10 +167,6 @@ def run_movielens_ingestion(
     force_download: bool = False,
     force_extract: bool = False
 ) -> dict:
-    """
-    Ejecuta la ingesta completa de MovieLens
-    hacia la capa Bronze.
-    """
 
     print("=" * 50)
     print("INICIO INGESTA MOVIELENS")
