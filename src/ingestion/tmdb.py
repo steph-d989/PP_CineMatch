@@ -15,6 +15,7 @@ from src.utils.paths import (
 )
 
 from src.utils.config import TMDB_BASE_URL
+from src.utils.movie_ids import load_tmdb_ids_from_movielens
 
 
 TMDB_BASE_URL = "https://api.themoviedb.org/3/movie"
@@ -34,34 +35,6 @@ def load_tmdb_token() -> str:  # Carga el Token desde .env
         )
 
     return token
-
-
-### FUNCION QUE LEE LINK.CSV DE MOVIEELNS Y DEVUELVE TMBID VALIDOS Y UNICO
-
-def load_tmdb_ids_from_movielens() -> list[int]:
-
-    ruta_links = (
-        BRONZE_MOVIELENS_DIR
-        / "ml-32m"
-        / "links.csv"
-    )
-
-    if not ruta_links.exists():
-        raise FileNotFoundError(
-            f"No se encontró {ruta_links}"
-        )
-
-    links = pd.read_csv(ruta_links)
-
-    tmdb_ids = (
-        links["tmdbId"]
-        .dropna()
-        .astype(int)
-        .unique()
-        .tolist()
-    )
-
-    return tmdb_ids
 
 
 ### FUNCION QUE CONSULTA UNA PELICULA Y DEVUELVE UN JSON
