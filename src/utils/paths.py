@@ -25,6 +25,10 @@ SILVER_TMDB_DIR = SILVER_DIR / "tmdb"
 SILVER_WATCHMODE_DIR = SILVER_DIR / "watchmode"
 SILVER_INTEGRATED_DIR = SILVER_DIR / "integrated"
 
+# Fuentes gold
+GOLD_ANALYTICS_DIR = GOLD_DIR / "analytics"
+GOLD_ML_DIR = GOLD_DIR / "ml"
+
 # Crear carpetas si no existen
 for path in [
     BRONZE_MOVIELENS_DIR,
@@ -38,5 +42,7 @@ for path in [
     SILVER_TMDB_DIR,
     SILVER_WATCHMODE_DIR,
     SILVER_INTEGRATED_DIR,
+    GOLD_ANALYTICS_DIR,
+    GOLD_ML_DIR,
 ]:
     path.mkdir(parents=True, exist_ok=True)
