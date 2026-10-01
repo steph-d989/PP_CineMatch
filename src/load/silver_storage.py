@@ -9,11 +9,11 @@ from src.utils.paths import (
 )
 
 from src.utils.supabase_client import (
-    build_storage_path,
     upload_file_to_storage,
 )
 
-### FUNCION QUE SUBE LOS ARCHIVOS DE UNA CARPETA SILVER AL BUCKET SILVER
+
+### FUNCIÓN QUE SUBE LOS ARCHIVOS DE UNA CARPETA SILVER AL BUCKET SILVER
 
 def upload_silver_directory(
     local_dir: Path,
@@ -25,21 +25,45 @@ def upload_silver_directory(
     resultados = {
         "source": source,
         "subidos": 0,
+        "existentes": 0,
         "errores": [],
     }
 
+    # Verificar que la carpeta exista
+    if not local_dir.exists():
+        raise FileNotFoundError(
+            f"No existe la carpeta Silver: {local_dir}"
+        )
+
+    # Buscar archivos también dentro de subcarpetas
     archivos = [
         archivo
-        for archivo in local_dir.iterdir()
+        for archivo in local_dir.rglob("*")
         if archivo.is_file()
     ]
 
+    if not archivos:
+        print(
+            f"{source} -> no se encontraron archivos para subir."
+        )
+
+        return resultados
+
     for archivo in archivos:
 
-        remote_path = build_storage_path(
-            source=source,
-            ingestion_date=ingestion_date,
-            filename=archivo.name,
+        # Mantener estructura interna.
+        # Ejemplo:
+        # ratings/part_000.parquet
+        relative_path = (
+            archivo
+            .relative_to(local_dir)
+            .as_posix()
+        )
+
+        remote_path = (
+            f"{source}/"
+            f"ingestion_date={ingestion_date}/"
+            f"{relative_path}"
         )
 
         try:
@@ -53,31 +77,53 @@ def upload_silver_directory(
             resultados["subidos"] += 1
 
             print(
-                f"{source} | {archivo.name} -> OK"
+                f"{source} | {relative_path} -> OK"
             )
 
         except Exception as error:
 
-            resultados["errores"].append(
-                {
-                    "archivo": archivo.name,
-                    "error": str(error),
-                }
-            )
+            mensaje = str(error)
 
-            print(
-                f"{source} | {archivo.name} -> ERROR"
-            )
-            
-            print(
-            "   Detalle:",
-            error
-        )
+            # Supabase puede devolver distintos mensajes
+            # cuando el objeto ya existe.
+            mensaje_lower = mensaje.lower()
+
+            if (
+                "already exists" in mensaje_lower
+                or "duplicate" in mensaje_lower
+                or "resource already exists" in mensaje_lower
+            ):
+
+                resultados["existentes"] += 1
+
+                print(
+                    f"{source} | "
+                    f"{relative_path} -> YA EXISTE"
+                )
+
+            else:
+
+                resultados["errores"].append(
+                    {
+                        "archivo": relative_path,
+                        "error": mensaje,
+                    }
+                )
+
+                print(
+                    f"{source} | "
+                    f"{relative_path} -> ERROR"
+                )
+
+                print(
+                    "   Detalle:",
+                    mensaje
+                )
 
     return resultados
 
 
-### FUNCION QUE PUBLICA TODA LA CAPA SILVER LOCAL EN SUPABASE
+### FUNCIÓN QUE PUBLICA TODA LA CAPA SILVER LOCAL EN SUPABASE
 
 def upload_silver_to_supabase() -> dict:
 
@@ -100,30 +146,83 @@ def upload_silver_to_supabase() -> dict:
             f"\nProcesando Silver/{source}"
         )
 
-        resultados[source] = (
-            upload_silver_directory(
-                local_dir=local_dir,
-                source=source,
+        try:
+            resultados[source] = (
+                upload_silver_directory(
+                    local_dir=local_dir,
+                    source=source,
+                )
             )
-        )
+
+        except Exception as error:
+
+            resultados[source] = {
+                "source": source,
+                "subidos": 0,
+                "existentes": 0,
+                "errores": [
+                    {
+                        "archivo": None,
+                        "error": str(error),
+                    }
+                ],
+            }
+
+            print(
+                f"{source} -> ERROR GENERAL"
+            )
+
+            print(
+                "   Detalle:",
+                error
+            )
 
     print("\n" + "=" * 60)
     print("RESUMEN")
     print("=" * 60)
 
+    total_subidos = 0
+    total_existentes = 0
+    total_errores = 0
+
     for source, resultado in resultados.items():
+
+        subidos = resultado["subidos"]
+        existentes = resultado["existentes"]
+        errores = len(
+            resultado["errores"]
+        )
+
+        total_subidos += subidos
+        total_existentes += existentes
+        total_errores += errores
 
         print(
             source,
             "| subidos:",
-            resultado["subidos"],
+            subidos,
+            "| existentes:",
+            existentes,
             "| errores:",
-            len(resultado["errores"]),
+            errores,
         )
+
+    print("-" * 60)
+
+    print(
+        "TOTAL",
+        "| subidos:",
+        total_subidos,
+        "| existentes:",
+        total_existentes,
+        "| errores:",
+        total_errores,
+    )
 
     print("=" * 60)
 
     return resultados
+
 
 if __name__ == "__main__":
     upload_silver_to_supabase()

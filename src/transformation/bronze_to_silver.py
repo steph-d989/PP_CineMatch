@@ -234,7 +234,7 @@ def transform_links(
 
 def save_movielens_silver(
     datasets: dict[str, pd.DataFrame]
-) -> dict[str, Path]:
+) -> dict:
 
     SILVER_MOVIELENS_DIR.mkdir(
         parents=True,
@@ -243,7 +243,13 @@ def save_movielens_silver(
 
     rutas = {}
 
-    for nombre, df in datasets.items():
+    for nombre in [
+        "movies",
+        "tags",
+        "links",
+    ]:
+
+        df = datasets[nombre]
 
         ruta = (
             SILVER_MOVIELENS_DIR
@@ -256,6 +262,12 @@ def save_movielens_silver(
         )
 
         rutas[nombre] = ruta
+
+    rutas["ratings"] = (
+        save_ratings_partitioned(
+            datasets["ratings"]
+        )
+    )
 
     return rutas
 
@@ -303,6 +315,63 @@ def save_movielens_silver_metadata(
         )
 
     return ruta_metadata
+
+### FUNCION QUE GUARDA LOS RATINGS PARTICIONADOS
+
+def save_ratings_partitioned(
+    df: pd.DataFrame,
+    rows_per_file: int = 2_000_000,
+) -> list[Path]:
+
+    ratings_dir = (
+        SILVER_MOVIELENS_DIR
+        / "ratings"
+    )
+
+    ratings_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    rutas = []
+
+    total_rows = len(df)
+
+    for i, start in enumerate(
+        range(
+            0,
+            total_rows,
+            rows_per_file
+        )
+    ):
+
+        end = min(
+            start + rows_per_file,
+            total_rows
+        )
+
+        chunk = df.iloc[
+            start:end
+        ]
+
+        ruta = (
+            ratings_dir
+            / f"part_{i:03d}.parquet"
+        )
+
+        chunk.to_parquet(
+            ruta,
+            index=False,
+        )
+
+        rutas.append(ruta)
+
+        print(
+            f"{ruta.name} -> "
+            f"{len(chunk):,} filas"
+        )
+
+    return rutas
 
 
 ### FUNCION QUE EJECUTA TRANSFORMACION BRONZE A SILVER
@@ -523,9 +592,6 @@ def transform_tmdb_movies(
 def clean_tmdb_movies(
     df: pd.DataFrame
 ) -> pd.DataFrame:
-    """
-    Limpia y tipa el DataFrame TMDb.
-    """
 
     df = df.copy()
 
@@ -594,9 +660,6 @@ def clean_tmdb_movies(
 def save_tmdb_silver(
     df: pd.DataFrame
 ) -> Path:
-    """
-    Guarda TMDb Silver como Parquet.
-    """
 
     SILVER_TMDB_DIR.mkdir(
         parents=True,
