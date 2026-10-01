@@ -19,6 +19,12 @@ BRONZE_MOVIELENS_DIR = BRONZE_DIR / "movielens"
 BRONZE_TMDB_DIR = BRONZE_DIR / "tmdb"
 BRONZE_WATCHMODE_DIR = BRONZE_DIR / "watchmode"
 
+# Fuentes Silver
+SILVER_MOVIELENS_DIR = SILVER_DIR / "movielens"
+SILVER_TMDB_DIR = SILVER_DIR / "tmdb"
+SILVER_WATCHMODE_DIR = SILVER_DIR / "watchmode"
+SILVER_INTEGRATED_DIR = SILVER_DIR / "integrated"
+
 # Crear carpetas si no existen
 for path in [
     BRONZE_MOVIELENS_DIR,
@@ -28,5 +34,9 @@ for path in [
     GOLD_DIR,
     MODELS_DIR,
     LOGS_DIR,
+    SILVER_MOVIELENS_DIR,
+    SILVER_TMDB_DIR,
+    SILVER_WATCHMODE_DIR,
+    SILVER_INTEGRATED_DIR,
 ]:
     path.mkdir(parents=True, exist_ok=True)
