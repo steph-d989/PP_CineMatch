@@ -7,6 +7,12 @@ from pathlib import Path
 import pandas as pd
 import requests
 from dotenv import load_dotenv
+from datetime import date
+
+from src.utils.supabase_client import (
+    build_storage_path,
+    upload_file_to_storage,
+)
 
 from src.validation.data_quality import (
     validate_file_exists,
@@ -324,6 +330,70 @@ def validate_watchmode() -> dict:
     }
     
 
+### FUNCION QUE SUMBE A STORAGE LOS JSON BRONZE DE WATCHMODE Y LA METADATA
+
+def upload_watchmode_to_supabase(
+    archivos: list[Path],
+    ruta_metadata: Path,
+) -> dict:
+
+    ingestion_date = date.today().isoformat()
+
+    resultados = {
+        "archivos_subidos": 0,
+        "metadata_subida": False,
+        "errores": [],
+    }
+
+    for archivo in archivos:
+
+        remote_path = build_storage_path(
+            source="watchmode",
+            ingestion_date=ingestion_date,
+            filename=archivo.name,
+        )
+
+        try:
+            upload_file_to_storage(
+                bucket="Bronze",
+                local_path=archivo,
+                remote_path=remote_path,
+                upsert=False,
+            )
+
+            resultados["archivos_subidos"] += 1
+
+        except Exception as error:
+            resultados["errores"].append({
+                "archivo": archivo.name,
+                "error": str(error),
+            })
+
+    remote_metadata = build_storage_path(
+        source="watchmode",
+        ingestion_date=ingestion_date,
+        filename=ruta_metadata.name,
+    )
+
+    try:
+        upload_file_to_storage(
+            bucket="Bronze",
+            local_path=ruta_metadata,
+            remote_path=remote_metadata,
+            upsert=False,
+        )
+
+        resultados["metadata_subida"] = True
+
+    except Exception as error:
+        resultados["errores"].append({
+            "archivo": ruta_metadata.name,
+            "error": str(error),
+        })
+
+    return resultados
+
+
 ### FUNCION PARA GUARDAR METADATA
 
 def save_watchmode_metadata(
@@ -437,11 +507,39 @@ def run_watchmode_ingestion(
 
     fecha_fin = datetime.now()
 
-    save_watchmode_metadata(
+    ruta_metadata = save_watchmode_metadata(
         resultado_extraccion,
         resultado_validacion,
         fecha_inicio,
         fecha_fin,
+    )
+    
+    archivos_watchmode = list(
+        BRONZE_WATCHMODE_DIR.glob(
+            "movie_*_sources.json"
+        )
+    )
+
+    print("\nSubiendo Watchmode a Supabase Storage...")
+
+    resultado_supabase = upload_watchmode_to_supabase(
+        archivos_watchmode,
+        ruta_metadata,
+    )
+
+    print(
+        "Archivos subidos:",
+        resultado_supabase["archivos_subidos"]
+    )
+
+    print(
+        "Metadata subida:",
+        resultado_supabase["metadata_subida"]
+    )
+
+    print(
+        "Errores Supabase:",
+        len(resultado_supabase["errores"])
     )
 
     print("\nResumen:")

@@ -7,6 +7,12 @@ from pathlib import Path
 import pandas as pd
 import requests
 from dotenv import load_dotenv
+from datetime import date
+
+from src.utils.supabase_client import (
+    build_storage_path,
+    upload_file_to_storage,
+)
 
 from src.validation.data_quality import (
     validate_file_exists,
@@ -244,7 +250,73 @@ def validate_tmdb() -> dict:
         "archivos_invalidos": invalidos,
     }
     
-    
+
+### FUNCION QUE SUBE A SUPABASE STORAGE LOS JSON DE TMDB
+
+def upload_tmdb_to_supabase(
+    archivos: list[Path],
+    ruta_metadata: Path,
+) -> dict:
+
+    ingestion_date = date.today().isoformat()
+
+    resultados = {
+        "archivos_subidos": 0,
+        "metadata_subida": False,
+        "errores": [],
+    }
+
+    # Subir películas
+    for archivo in archivos:
+
+        remote_path = build_storage_path(
+            source="tmdb",
+            ingestion_date=ingestion_date,
+            filename=archivo.name,
+        )
+
+        try:
+            upload_file_to_storage(
+                bucket="Bronze",
+                local_path=archivo,
+                remote_path=remote_path,
+                upsert=False,
+            )
+
+            resultados["archivos_subidos"] += 1
+
+        except Exception as error:
+            resultados["errores"].append({
+                "archivo": archivo.name,
+                "error": str(error),
+            })
+
+    # Subir metadata
+    remote_metadata = build_storage_path(
+        source="tmdb",
+        ingestion_date=ingestion_date,
+        filename=ruta_metadata.name,
+    )
+
+    try:
+        upload_file_to_storage(
+            bucket="Bronze",
+            local_path=ruta_metadata,
+            remote_path=remote_metadata,
+            upsert=False,
+        )
+
+        resultados["metadata_subida"] = True
+
+    except Exception as error:
+        resultados["errores"].append({
+            "archivo": ruta_metadata.name,
+            "error": str(error),
+        })
+
+    return resultados
+
+
 ### FUNCION PARA ALMACENAR LA METADATA
 
 def save_tmdb_metadata(
@@ -328,11 +400,37 @@ def run_tmdb_ingestion(
 
     fecha_fin = datetime.now()
 
-    save_tmdb_metadata(
+    ruta_metadata = save_tmdb_metadata(
         resultado_extraccion,
         resultado_validacion,
         fecha_inicio,
         fecha_fin,
+    )
+    
+    archivos_tmdb = list(
+    BRONZE_TMDB_DIR.glob("movie_*.json")
+    )
+
+    print("\nSubiendo TMDb a Supabase Storage...")
+
+    resultado_supabase = upload_tmdb_to_supabase(
+        archivos_tmdb,
+        ruta_metadata,
+    )
+
+    print(
+        "Archivos subidos:",
+        resultado_supabase["archivos_subidos"]
+    )
+
+    print(
+        "Metadata subida:",
+        resultado_supabase["metadata_subida"]
+    )
+
+    print(
+        "Errores Supabase:",
+        len(resultado_supabase["errores"])
     )
 
     print("=" * 50)
