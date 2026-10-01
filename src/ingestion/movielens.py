@@ -2,12 +2,18 @@ import json
 import zipfile
 from datetime import datetime
 from pathlib import Path
+from datetime import date
 
 import requests
 
 from src.validation.data_quality import (
     validate_file_exists,
     validate_csv_file,
+)
+
+from src.utils.supabase_client import (
+    build_storage_path,
+    upload_file_to_storage,
 )
 
 from src.utils.paths import BRONZE_MOVIELENS_DIR
@@ -132,6 +138,50 @@ def validate_movielens(
     return resultado
 
 
+### FUNCION QUE SUBE DE BRONZE A SUPABASE STORAGE
+
+def upload_movielens_to_supabase(
+    # ruta_zip: Path,
+    ruta_metadata: Path,
+) -> dict:
+
+    ingestion_date = date.today().isoformat()
+
+    resultados = {}
+    
+
+    # ZIP original
+    # remote_zip = build_storage_path(
+    #    source="movielens",
+    #    ingestion_date=ingestion_date,
+    #    filename=ruta_zip.name,
+    #)
+
+    #resultados["zip"] = upload_file_to_storage(
+    #    bucket="Bronze",
+    #    local_path=ruta_zip,
+    #    remote_path=remote_zip,
+    #    upsert=False,
+    #)
+
+
+    # Metadata
+    remote_metadata = build_storage_path(
+        source="movielens",
+        ingestion_date=ingestion_date,
+        filename=ruta_metadata.name,
+    )
+
+    resultados["metadata"] = upload_file_to_storage(
+        bucket="Bronze",
+        local_path=ruta_metadata,
+        remote_path=remote_metadata,
+        upsert=False,
+    )
+
+    return resultados
+
+
 ### FUNCION PARA METADATA
 
 def save_metadata(
@@ -204,8 +254,17 @@ def run_movielens_ingestion(
         carpeta_dataset
     )
 
-    save_metadata(validacion)
+    ruta_metadata = save_metadata(validacion)
 
+    print("\nSubiendo MovieLens a Supabase Storage...")
+
+    upload_result = upload_movielens_to_supabase(
+        # ruta_zip,
+        ruta_metadata,
+    )
+
+    print("MovieLens subido correctamente a Supabase.")
+        
     print("\nValidación:")
 
     for archivo, info in validacion.items():
