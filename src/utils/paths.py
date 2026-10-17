@@ -29,6 +29,20 @@ SILVER_INTEGRATED_DIR = SILVER_DIR / "integrated"
 GOLD_ANALYTICS_DIR = GOLD_DIR / "analytics"
 GOLD_ML_DIR = GOLD_DIR / "ml"
 
+# Gold Analytics
+GOLD_DIMENSIONAL_DIR = GOLD_ANALYTICS_DIR / "dimensional"
+GOLD_DIMENSIONS_DIR = GOLD_DIMENSIONAL_DIR / "dimensions"
+GOLD_FACTS_DIR = GOLD_DIMENSIONAL_DIR / "facts"
+GOLD_METRICS_DIR = GOLD_ANALYTICS_DIR / "metrics"
+
+# Gold ML
+GOLD_ML_CONTENT_DIR = GOLD_ML_DIR / "content_based"
+GOLD_ML_COLLABORATIVE_DIR = GOLD_ML_DIR / "collaborative"
+GOLD_ML_HYBRID_DIR = GOLD_ML_DIR / "hybrid"
+
+# Gold Serving
+GOLD_SERVING_DIR = GOLD_DIR / "serving"
+
 # Crear carpetas si no existen
 for path in [
     BRONZE_MOVIELENS_DIR,
@@ -43,6 +57,14 @@ for path in [
     SILVER_WATCHMODE_DIR,
     SILVER_INTEGRATED_DIR,
     GOLD_ANALYTICS_DIR,
+    GOLD_DIMENSIONAL_DIR,
+    GOLD_DIMENSIONS_DIR,
+    GOLD_FACTS_DIR,
+    GOLD_METRICS_DIR,
     GOLD_ML_DIR,
+    GOLD_ML_CONTENT_DIR,
+    GOLD_ML_COLLABORATIVE_DIR,
+    GOLD_ML_HYBRID_DIR,
+    GOLD_SERVING_DIR,
 ]:
     path.mkdir(parents=True, exist_ok=True)
