@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pandas as pd
 
 from src.utils.paths import (
@@ -145,6 +147,60 @@ def save_ml_dataset(
 
     return ruta
 
+### FUNCION QUE GUARDA LOS DATOS EN MULTIPLES ARCHIVOS PARQUET
+
+def save_partitioned_parquet(
+    df: pd.DataFrame,
+    directory: Path,
+    folder_name: str,
+    rows_per_file: int = 2_000_000,
+) -> list[Path]:
+
+    target_dir = directory / folder_name
+
+    target_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    rutas = []
+
+    total_rows = len(df)
+
+    for i, start in enumerate(
+        range(
+            0,
+            total_rows,
+            rows_per_file,
+        )
+    ):
+        end = min(
+            start + rows_per_file,
+            total_rows,
+        )
+
+        chunk = df.iloc[start:end]
+
+        ruta = (
+            target_dir
+            / f"part_{i:03d}.parquet"
+        )
+
+        chunk.to_parquet(
+            ruta,
+            index=False,
+        )
+
+        rutas.append(ruta)
+
+        print(
+            f"{folder_name}/"
+            f"{ruta.name} -> "
+            f"{len(chunk):,} filas"
+        )
+
+    return rutas
+
 ### FUNCION QUE ORQUESTA
 
 def run_gold_analytics_to_ml():
@@ -198,6 +254,14 @@ def run_gold_analytics_to_ml():
             content_based_features,
             GOLD_ML_CONTENT_DIR,
             "content_based_features.parquet",
+        )
+    )
+
+    rutas["collaborative_interactions"] = (
+        save_partitioned_parquet(
+            collaborative_interactions,
+            GOLD_ML_COLLABORATIVE_DIR,
+            "collaborative_interactions",
         )
     )
 

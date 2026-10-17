@@ -671,6 +671,60 @@ def save_gold_metadata(
 
     return ruta_metadata
 
+### FUNCION QUE GUARDA UN DATAFRAME GRANDE EN MULTIPLES ARCHIVOS
+
+def save_partitioned_parquet(
+    df: pd.DataFrame,
+    directory: Path,
+    folder_name: str,
+    rows_per_file: int = 2_000_000,
+) -> list[Path]:
+
+    target_dir = directory / folder_name
+
+    target_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    rutas = []
+
+    total_rows = len(df)
+
+    for i, start in enumerate(
+        range(
+            0,
+            total_rows,
+            rows_per_file,
+        )
+    ):
+        end = min(
+            start + rows_per_file,
+            total_rows,
+        )
+
+        chunk = df.iloc[start:end]
+
+        ruta = (
+            target_dir
+            / f"part_{i:03d}.parquet"
+        )
+
+        chunk.to_parquet(
+            ruta,
+            index=False,
+        )
+
+        rutas.append(ruta)
+
+        print(
+            f"{folder_name}/"
+            f"{ruta.name} -> "
+            f"{len(chunk):,} filas"
+        )
+
+    return rutas
+
 ### FUNCION QUE EJECUTA ORQUESTADOR DE SILVER A GOLD
 
 def run_silver_to_gold() -> dict:
@@ -820,6 +874,14 @@ def run_silver_to_gold() -> dict:
 
     datasets["movie_metrics"] = (
         movie_metrics
+    )
+    
+    rutas["fact_rating"] = (
+        save_partitioned_parquet(
+            fact_rating,
+            GOLD_FACTS_DIR,
+            "fact_rating",
+        )
     )
     
     rutas["user_metrics"] = (

@@ -1,35 +1,25 @@
 from datetime import date
 from pathlib import Path
 
-from src.utils.paths import (
-    GOLD_ANALYTICS_DIR,
-    GOLD_ML_DIR,
-)
-
+from src.utils.paths import GOLD_DIR
 from src.utils.supabase_client import (
     upload_file_to_storage,
 )
 
-### FUNCION QUE SUBE LOS ARCHIVOS DE UNA CARPETA GOLD AL BUCKET DE SUPABASE
+### FUNCION QUE SUBE LOS AARCHIVOS A GOLD CONSERVANDO LA ESTRUCTURA
 
 def upload_gold_directory(
     local_dir: Path,
-    source: str,
+    source_root: Path,
 ) -> dict:
 
     ingestion_date = date.today().isoformat()
 
     resultados = {
-        "source": source,
         "subidos": 0,
         "existentes": 0,
         "errores": [],
     }
-
-    if not local_dir.exists():
-        raise FileNotFoundError(
-            f"No existe la carpeta Gold: {local_dir}"
-        )
 
     archivos = [
         archivo
@@ -37,23 +27,15 @@ def upload_gold_directory(
         if archivo.is_file()
     ]
 
-    if not archivos:
-        print(
-            f"{source} -> no hay archivos para subir."
-        )
-
-        return resultados
-
     for archivo in archivos:
 
         relative_path = (
             archivo
-            .relative_to(local_dir)
+            .relative_to(source_root)
             .as_posix()
         )
 
         remote_path = (
-            f"{source}/"
             f"ingestion_date={ingestion_date}/"
             f"{relative_path}"
         )
@@ -69,7 +51,7 @@ def upload_gold_directory(
             resultados["subidos"] += 1
 
             print(
-                f"{source} | {relative_path} -> OK"
+                f"{relative_path} -> OK"
             )
 
         except Exception as error:
@@ -80,25 +62,26 @@ def upload_gold_directory(
             if (
                 "already exists" in mensaje_lower
                 or "duplicate" in mensaje_lower
-                or "resource already exists" in mensaje_lower
+                or "resource already exists"
+                in mensaje_lower
             ):
 
                 resultados["existentes"] += 1
 
                 print(
-                    f"{source} | "
                     f"{relative_path} -> YA EXISTE"
                 )
 
             else:
 
-                resultados["errores"].append({
-                    "archivo": relative_path,
-                    "error": mensaje,
-                })
+                resultados["errores"].append(
+                    {
+                        "archivo": relative_path,
+                        "error": mensaje,
+                    }
+                )
 
                 print(
-                    f"{source} | "
                     f"{relative_path} -> ERROR"
                 )
 
@@ -109,8 +92,7 @@ def upload_gold_directory(
 
     return resultados
 
-
-### FUNCION QUE PUBLICA GOLD ANALITICO EN SUPABASE STORAGE
+### FUNCION QUE PUBLICA LA CAPA GOLD LOCAL A UPABASE STORAGE
 
 def upload_gold_to_supabase() -> dict:
 
@@ -118,95 +100,38 @@ def upload_gold_to_supabase() -> dict:
     print("SUBIDA GOLD A SUPABASE")
     print("=" * 60)
 
-    fuentes = {
-        "analytics": GOLD_ANALYTICS_DIR,
-        "ml": GOLD_ML_DIR,
-    }
-
-    resultados = {}
-
-    for source, local_dir in fuentes.items():
-
-        print(
-            f"\nProcesando Gold/{source}"
+    if not GOLD_DIR.exists():
+        raise FileNotFoundError(
+            f"No existe la carpeta Gold: {GOLD_DIR}"
         )
 
-        try:
-            resultados[source] = (
-                upload_gold_directory(
-                    local_dir=local_dir,
-                    source=source,
-                )
-            )
-
-        except Exception as error:
-
-            resultados[source] = {
-                "source": source,
-                "subidos": 0,
-                "existentes": 0,
-                "errores": [
-                    {
-                        "archivo": None,
-                        "error": str(error),
-                    }
-                ],
-            }
-
-            print(
-                f"{source} -> ERROR GENERAL"
-            )
-
-            print(
-                "   Detalle:",
-                error
-            )
+    resultado = upload_gold_directory(
+        local_dir=GOLD_DIR,
+        source_root=GOLD_DIR,
+    )
 
     print("\n" + "=" * 60)
-    print("RESUMEN")
+    print("RESUMEN GOLD")
     print("=" * 60)
 
-    total_subidos = 0
-    total_existentes = 0
-    total_errores = 0
-
-    for source, resultado in resultados.items():
-
-        subidos = resultado["subidos"]
-        existentes = resultado["existentes"]
-        errores = len(
-            resultado["errores"]
-        )
-
-        total_subidos += subidos
-        total_existentes += existentes
-        total_errores += errores
-
-        print(
-            source,
-            "| subidos:",
-            subidos,
-            "| existentes:",
-            existentes,
-            "| errores:",
-            errores,
-        )
-
-    print("-" * 60)
+    print(
+        "Subidos:",
+        resultado["subidos"]
+    )
 
     print(
-        "TOTAL",
-        "| subidos:",
-        total_subidos,
-        "| existentes:",
-        total_existentes,
-        "| errores:",
-        total_errores,
+        "Ya existentes:",
+        resultado["existentes"]
+    )
+
+    print(
+        "Errores:",
+        len(resultado["errores"])
     )
 
     print("=" * 60)
 
-    return resultados
+    return resultado
 
 
 if __name__ == "__main__":
