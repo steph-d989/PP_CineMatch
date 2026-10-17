@@ -738,24 +738,6 @@ def run_silver_to_gold() -> dict:
         silver["ratings"]
     )
 
-    # MACHINE LEARNING
-
-    print(
-        "Construyendo datasets ML..."
-    )
-
-    content_based_features = (
-        build_content_based_features(
-            silver["movies"]
-        )
-    )
-
-    collaborative_interactions = (
-        build_collaborative_interactions(
-            silver["ratings"]
-        )
-    )
-
     # GUARDAR DATASETS
 
     rutas = {}
@@ -851,36 +833,6 @@ def run_silver_to_gold() -> dict:
     datasets["user_metrics"] = (
         user_metrics
     )
-
-    # ML - CONTENT BASED
-
-    rutas["content_based_features"] = (
-        save_gold_dataset(
-            content_based_features,
-            GOLD_ML_CONTENT_DIR,
-            "content_based_features.parquet",
-        )
-    )
-
-    datasets[
-        "content_based_features"
-    ] = content_based_features
-
-    # ML - COLLABORATIVE
-
-    rutas[
-        "collaborative_interactions"
-    ] = (
-        save_gold_dataset(
-            collaborative_interactions,
-            GOLD_ML_COLLABORATIVE_DIR,
-            "collaborative_interactions.parquet",
-        )
-    )
-
-    datasets[
-        "collaborative_interactions"
-    ] = collaborative_interactions
 
     # METADATA
 
