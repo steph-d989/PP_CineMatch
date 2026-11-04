@@ -7,6 +7,8 @@ from src.ingestion.tmdb import (
     extract_tmdb_movie,
     extract_tmdb_movies,
     upload_tmdb_to_supabase,
+    run_tmdb_ingestion,
+    validate_tmdb_local_file
 )
 
 from src.utils.config import TMDB_BASE_URL
@@ -337,6 +339,230 @@ class TMDbTests(unittest.TestCase):
             # Dos películas y los metadatos
             self.assertEqual(
                 mock_upload.call_count, 3
+            )
+    
+    def test_error_subida_supabase(self):
+
+        with TemporaryDirectory() as temporal:
+            directorio = Path(temporal)
+
+            archivo = directorio / "movie_550.json"
+            archivo.write_text(
+                '{"id": 550}',
+                encoding="utf-8"
+            )
+
+            metadata = directorio / "_metadata.json"
+            metadata.write_text(
+                '{"fuente": "TMDb"}',
+                encoding="utf-8"
+            )
+
+            def subida_simulada(**kwargs):
+                if kwargs["local_path"] == archivo:
+                    raise RuntimeError("Error simulado de Storage")
+                return {"status": "ok"}
+
+            with (
+                patch(
+                    "src.ingestion.tmdb.list_storage_filenames",
+                    return_value=set()
+                ),
+                patch(
+                    "src.ingestion.tmdb.upload_file_to_storage",
+                    side_effect=subida_simulada
+                ),
+            ):
+                resultado = upload_tmdb_to_supabase(
+                    archivos=[archivo],
+                    ruta_metadata=metadata
+                )
+
+            self.assertEqual(
+                resultado["archivos_subidos"], 0
+            )
+
+            self.assertEqual(
+                len(resultado["errores"]), 1
+            )
+
+            self.assertTrue(
+                resultado["metadata_subida"]
+            )
+
+            self.assertEqual(
+                resultado["errores"][0]["archivo"],
+                "movie_550.json"
+            )
+
+    
+    def test_pipeline_reporta_error_supabase(self):
+
+        extraccion = {
+            "solicitados": 1,
+            "exitosos": 1,
+            "existentes": 0,
+            "errores": [],
+            "archivos_nuevos": [],
+        }
+
+        validacion = {
+            "archivos_totales": 1,
+            "archivos_validos": 1,
+            "archivos_invalidos": [],
+        }
+
+        sincronizacion = {
+            "archivos_subidos": 0,
+            "archivos_existentes": 0,
+            "metadata_subida": True,
+            "errores": [
+                {
+                    "archivo": "movie_550.json",
+                    "error": "Error simulado",
+                }
+            ],
+        }
+
+        with (
+            patch(
+                "src.ingestion.tmdb.load_tmdb_token",
+                return_value="token_simulado"
+            ),
+            patch(
+                "src.ingestion.tmdb.load_tmdb_ids_from_movielens",
+                return_value=[550]
+            ),
+            patch(
+                "src.ingestion.tmdb.extract_tmdb_movies",
+                return_value=extraccion
+            ),
+            patch(
+                "src.ingestion.tmdb.validate_tmdb",
+                return_value=validacion
+            ),
+            patch(
+                "src.ingestion.tmdb.save_tmdb_metadata"
+            ),
+            patch(
+                "src.ingestion.tmdb.BRONZE_TMDB_DIR"
+            ) as mock_directorio,
+            patch(
+                "src.ingestion.tmdb.upload_tmdb_to_supabase",
+                return_value=sincronizacion
+            ),
+        ):
+
+            mock_directorio.glob.return_value = []
+
+            resultado = run_tmdb_ingestion(limit=1)
+
+        self.assertEqual(
+            resultado["estado"],
+            "partial"
+        )
+
+        self.assertEqual(
+            resultado["total_errores"],
+            1
+        )
+
+        self.assertEqual(
+            resultado["supabase"],
+            sincronizacion
+        )
+
+    
+    def test_validacion_json_tmdb(self):
+
+        with TemporaryDirectory() as temporal:
+            directorio = Path(temporal)
+
+            archivo_valido = directorio / "movie_550.json"
+            archivo_valido.write_text(
+                '{"id": 550, "title": "Fight Club"}',
+                encoding="utf-8"
+            )
+
+            archivo_invalido = directorio / "movie_100.json"
+            archivo_invalido.write_text(
+                '{"id": 200}',
+                encoding="utf-8"
+            )
+
+            resultado_valido = validate_tmdb_local_file(
+                archivo_valido
+            )
+
+            resultado_invalido = validate_tmdb_local_file(
+                archivo_invalido
+            )
+
+            self.assertTrue(resultado_valido["valid"])
+
+            self.assertFalse(resultado_invalido["valid"])
+
+            self.assertEqual(
+                resultado_invalido["error"],
+                "tmdb_id_mismatch"
+            )
+
+    
+    def test_no_subir_json_invalido(self):
+
+        with TemporaryDirectory() as temporal:
+            directorio = Path(temporal)
+
+            archivo = directorio / "movie_550.json"
+
+            # El ID interno no coincide con el nombre
+            archivo.write_text(
+                '{"id": 999, "title": "Película incorrecta"}',
+                encoding="utf-8"
+            )
+
+            metadata = directorio / "_metadata.json"
+            metadata.write_text(
+                '{"fuente": "TMDb"}',
+                encoding="utf-8"
+            )
+
+            with (
+                patch(
+                    "src.ingestion.tmdb.list_storage_filenames",
+                    return_value=set()
+                ),
+                patch(
+                    "src.ingestion.tmdb.upload_file_to_storage"
+                ) as mock_upload,
+            ):
+
+                resultado = upload_tmdb_to_supabase(
+                    archivos=[archivo],
+                    ruta_metadata=metadata
+                )
+
+            # La película no debe subirse
+            self.assertEqual(
+                resultado["archivos_subidos"], 0
+            )
+
+            # Debe registrarse el error
+            self.assertEqual(
+                len(resultado["errores"]), 1
+            )
+
+            self.assertEqual(
+                resultado["errores"][0]["error"],
+                "tmdb_id_mismatch"
+            )
+
+            # Se permite subir únicamente los metadatos
+            mock_upload.assert_called_once()
+
+            self.assertEqual(
+                mock_upload.call_args.kwargs["local_path"],
+                metadata
             )
 
 

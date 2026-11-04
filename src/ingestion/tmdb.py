@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 import requests
+import re
 from dotenv import load_dotenv
 from datetime import date
 
@@ -257,6 +258,111 @@ def validate_tmdb() -> dict:
     }
     
 
+### FUNCION QUE VERIFICA LA INTEGRIDAD DEL JSON TMDB
+
+def validate_tmdb_local_file(archivo: Path) -> dict:
+
+    if not archivo.is_file():
+        return {
+            "valid": False,
+            "error": "file_not_found",
+        }
+
+    coincidencia = re.fullmatch(
+        r"movie_(\d+)\.json",
+        archivo.name,
+    )
+
+    if not coincidencia:
+        return {
+            "valid": False,
+            "error": "invalid_filename",
+        }
+
+    tmdb_id = int(coincidencia.group(1))
+
+    try:
+        with open(archivo, "r", encoding="utf-8") as f:
+            datos = json.load(f)
+
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        return {
+            "valid": False,
+            "error": str(error),
+        }
+
+    if not isinstance(datos, dict):
+        return {
+            "valid": False,
+            "error": "invalid_json_structure",
+        }
+
+    if datos.get("id") != tmdb_id:
+        return {
+            "valid": False,
+            "error": "tmdb_id_mismatch",
+        }
+
+    return {
+        "valid": True,
+        "tmdb_id": tmdb_id,
+    }
+
+
+
+def validate_tmdb_local_file(archivo: Path) -> dict:
+
+    if not archivo.is_file():
+        return {
+            "valid": False,
+            "error": "file_not_found",
+        }
+
+    coincidencia = re.fullmatch(
+        r"movie_(\d+)\.json",
+        archivo.name,
+    )
+
+    if not coincidencia:
+        return {
+            "valid": False,
+            "error": "invalid_filename",
+        }
+
+    tmdb_id = int(coincidencia.group(1))
+
+    try:
+        with open(archivo, "r", encoding="utf-8") as f:
+            datos = json.load(f)
+
+    except (
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+    ) as error:
+        return {
+            "valid": False,
+            "error": str(error),
+        }
+
+    if not isinstance(datos, dict):
+        return {
+            "valid": False,
+            "error": "invalid_json_structure",
+        }
+
+    if datos.get("id") != tmdb_id:
+        return {
+            "valid": False,
+            "error": "tmdb_id_mismatch",
+        }
+
+    return {
+        "valid": True,
+        "tmdb_id": tmdb_id,
+    }
+
+
 ### FUNCION QUE SUBE A SUPABASE STORAGE LOS JSON DE TMDB
 
 def upload_tmdb_to_supabase(
@@ -286,6 +392,21 @@ def upload_tmdb_to_supabase(
 
         # Obtener el ID desde el nombre del archivo
         tmdb_id = int(archivo.stem.removeprefix("movie_"))
+
+        
+        validacion = validate_tmdb_local_file(archivo)
+
+        if not validacion["valid"]:
+            resultados["errores"].append({
+                "archivo": archivo.name,
+                "error": validacion["error"],
+            })
+
+            print(
+                f"{archivo.name}: JSON inválido - "
+                f"{validacion['error']}"
+            )
+            continue
 
         # Construir ruta estable en Supabase
         remote_path = build_tmdb_movie_path(tmdb_id)
@@ -469,10 +590,38 @@ def run_tmdb_ingestion(
     print("FIN INGESTA TMDb")
     print("=" * 50)
 
+    
+    errores_extraccion = len(
+        resultado_extraccion["errores"]
+    )
+
+    errores_validacion = len(
+        resultado_validacion["archivos_invalidos"]
+    )
+
+    errores_supabase = len(
+        resultado_supabase["errores"]
+    )
+
+    total_errores = (
+        errores_extraccion
+        + errores_validacion
+        + errores_supabase
+    )
+
+    if total_errores == 0:
+        estado = "success"
+    else:
+        estado = "partial"
+
     return {
+        "estado": estado,
         "extraccion": resultado_extraccion,
         "validacion": resultado_validacion,
+        "supabase": resultado_supabase,
+        "total_errores": total_errores,
     }
+
     
 if __name__ == "__main__":
     run_tmdb_ingestion()
