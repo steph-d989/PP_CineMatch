@@ -314,6 +314,25 @@ class TMDbTests(unittest.TestCase):
 
             # Listado remoto: una sola llamada
             mock_list.assert_called_once()
+            
+            self.assertEqual(
+                mock_list.call_args.kwargs["folder"],
+                "tmdb/movies"
+            )
+
+            rutas_subidas = [
+                llamada.kwargs["remote_path"]
+                for llamada in mock_upload.call_args_list
+                if llamada.kwargs["local_path"].name.startswith("movie_")
+            ]
+
+            self.assertEqual(
+                set(rutas_subidas),
+                {
+                    "tmdb/movies/movie_200.json",
+                    "tmdb/movies/movie_300.json",
+                }
+            )
 
             # Dos películas y los metadatos
             self.assertEqual(

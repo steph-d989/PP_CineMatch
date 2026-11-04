@@ -11,6 +11,7 @@ from datetime import date
 
 from src.utils.supabase_client import (
     build_storage_path,
+    build_tmdb_movie_path,
     upload_file_to_storage,
     list_storage_filenames,
 )
@@ -265,9 +266,7 @@ def upload_tmdb_to_supabase(
 
     ingestion_date = date.today().isoformat()
 
-    carpeta_remota = (
-        f"tmdb/ingestion_date={ingestion_date}"
-    )
+    carpeta_remota = "tmdb/movies"
 
     resultados = {
         "archivos_subidos": 0,
@@ -285,11 +284,11 @@ def upload_tmdb_to_supabase(
 
     for archivo in archivos:
 
-        remote_path = build_storage_path(
-            source="tmdb",
-            ingestion_date=ingestion_date,
-            filename=archivo.name,
-        )
+        # Obtener el ID desde el nombre del archivo
+        tmdb_id = int(archivo.stem.removeprefix("movie_"))
+
+        # Construir ruta estable en Supabase
+        remote_path = build_tmdb_movie_path(tmdb_id)
 
         if archivo.name in archivos_remotos:
             resultados["archivos_existentes"] += 1
