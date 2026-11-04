@@ -5,7 +5,8 @@ from src.utils.supabase_client import (
     storage_file_exists,
     list_storage_filenames,
     build_tmdb_movie_path,
-    list_tmdb_legacy_files
+    list_tmdb_legacy_files,
+    plan_tmdb_migration
 )
 
 
@@ -239,6 +240,69 @@ class SupabaseClientTests(unittest.TestCase):
             )
         )
 
+    
+    def test_plan_tmdb_migration(self):
+
+        inventario = [
+            {
+                "archivo": "movie_100.json",
+                "ruta_antigua": (
+                    "tmdb/ingestion_date=2026-11-01/"
+                    "movie_100.json"
+                ),
+                "fecha_carpeta": "2026-11-01",
+            },
+            {
+                "archivo": "movie_100.json",
+                "ruta_antigua": (
+                    "tmdb/ingestion_date=2026-11-04/"
+                    "movie_100.json"
+                ),
+                "fecha_carpeta": "2026-11-04",
+            },
+            {
+                "archivo": "movie_200.json",
+                "ruta_antigua": (
+                    "tmdb/ingestion_date=2026-11-04/"
+                    "movie_200.json"
+                ),
+                "fecha_carpeta": "2026-11-04",
+            },
+        ]
+
+        with (
+            patch(
+                "src.utils.supabase_client.list_tmdb_legacy_files",
+                return_value=inventario
+            ),
+            patch(
+                "src.utils.supabase_client.list_storage_filenames",
+                return_value={"movie_200.json"}
+            ),
+        ):
+            resultado = plan_tmdb_migration()
+
+        self.assertEqual(
+            resultado["peliculas_unicas"], 2
+        )
+        self.assertEqual(
+            len(resultado["pendientes"]), 1
+        )
+        self.assertEqual(
+            len(resultado["existentes"]), 1
+        )
+        self.assertEqual(
+            len(resultado["duplicados"]), 1
+        )
+        self.assertEqual(
+            resultado["pendientes"][0]["origen"],
+            (
+                "tmdb/ingestion_date=2026-11-04/"
+                "movie_100.json"
+            )
+        )
+
+    
 
 if __name__ == "__main__":
     unittest.main()

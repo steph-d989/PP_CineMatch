@@ -285,3 +285,64 @@ def list_tmdb_legacy_files(
                 })
 
     return inventario
+
+
+
+def plan_tmdb_migration() -> dict:
+    """
+    Construye un plan de migración.
+    No copia, elimina ni modifica archivos.
+    """
+
+    inventario = list_tmdb_legacy_files()
+
+    archivos_destino = list_storage_filenames(
+        bucket="Bronze",
+        folder="tmdb/movies",
+    )
+
+    agrupados = {}
+
+    for registro in inventario:
+        nombre = registro["archivo"]
+        agrupados.setdefault(nombre, []).append(registro)
+
+    pendientes = []
+    existentes = []
+    duplicados = []
+
+    for nombre, versiones in sorted(agrupados.items()):
+
+        versiones = sorted(
+            versiones,
+            key=lambda x: x["fecha_carpeta"],
+            reverse=True,
+        )
+
+        if len(versiones) > 1:
+            duplicados.append({
+                "archivo": nombre,
+                "versiones": len(versiones),
+                "rutas": [
+                    item["ruta_antigua"]
+                    for item in versiones
+                ],
+            })
+
+        registro = {
+            "archivo": nombre,
+            "origen": versiones[0]["ruta_antigua"],
+            "destino": f"tmdb/movies/{nombre}",
+        }
+
+        if nombre in archivos_destino:
+            existentes.append(registro)
+        else:
+            pendientes.append(registro)
+
+    return {
+        "peliculas_unicas": len(agrupados),
+        "pendientes": pendientes,
+        "existentes": existentes,
+        "duplicados": duplicados,
+    }
