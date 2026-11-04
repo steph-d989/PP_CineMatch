@@ -249,15 +249,14 @@ def list_tmdb_legacy_files(
     No modifica archivos en Supabase.
     """
 
-    supabase = get_supabase_client()
-    storage = supabase.storage.from_(bucket)
-
-    carpetas = storage.list(path="tmdb")
+    carpetas = list_storage_folders(
+        bucket=bucket,
+        folder="tmdb",
+    )
 
     inventario = []
 
-    for carpeta in carpetas:
-        nombre = carpeta.get("name", "")
+    for nombre in carpetas:
 
         if not nombre.startswith("ingestion_date="):
             continue
@@ -346,3 +345,53 @@ def plan_tmdb_migration() -> dict:
         "existentes": existentes,
         "duplicados": duplicados,
     }
+    
+
+def list_storage_folders(
+    bucket: str,
+    folder: str,
+    page_size: int = 100,
+) -> list[str]:
+    """
+    Lista las subcarpetas mediante paginación.
+    No modifica archivos en Supabase.
+    """
+
+    if page_size < 1:
+        raise ValueError(
+            "page_size debe ser mayor que cero"
+        )
+
+    supabase = get_supabase_client()
+    storage = supabase.storage.from_(bucket)
+
+    carpetas = []
+    offset = 0
+
+    while True:
+        objetos = storage.list(
+            path=folder,
+            options={
+                "limit": page_size,
+                "offset": offset,
+                "sortBy": {
+                    "column": "name",
+                    "order": "asc",
+                },
+            },
+        )
+
+        for objeto in objetos:
+            nombre = objeto.get("name")
+
+            # Las carpetas aparecen sin ID de archivo.
+            if nombre and objeto.get("id") is None:
+                carpetas.append(nombre)
+
+        if len(objetos) < page_size:
+            break
+
+        offset += page_size
+
+    return carpetas
+

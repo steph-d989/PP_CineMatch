@@ -6,7 +6,8 @@ from src.utils.supabase_client import (
     list_storage_filenames,
     build_tmdb_movie_path,
     list_tmdb_legacy_files,
-    plan_tmdb_migration
+    plan_tmdb_migration,
+    list_storage_folders
 )
 
 
@@ -216,18 +217,20 @@ class SupabaseClientTests(unittest.TestCase):
 
         with (
             patch(
-                "src.utils.supabase_client.get_supabase_client",
-                return_value=cliente
+                "src.utils.supabase_client.list_storage_folders",
+                return_value=[
+                    "ingestion_date=2026-11-04",
+                    "movies",
+                ],
             ),
             patch(
                 "src.utils.supabase_client.list_storage_filenames",
                 return_value={
                     "movie_550.json",
                     "_metadata.json",
-                }
+                },
             ),
         ):
-
             inventario = list_tmdb_legacy_files()
 
         self.assertEqual(len(inventario), 1)
@@ -303,6 +306,49 @@ class SupabaseClientTests(unittest.TestCase):
         )
 
     
+    def test_paginacion_carpetas(self):
+
+        cliente = MagicMock()
+        storage = cliente.storage.from_.return_value
+
+        storage.list.side_effect = [
+            [
+                {
+                    "name": "ingestion_date=2026-11-01",
+                    "id": None,
+                },
+                {
+                    "name": "ingestion_date=2026-11-02",
+                    "id": None,
+                },
+            ],
+            [
+                {
+                    "name": "ingestion_date=2026-11-03",
+                    "id": None,
+                },
+            ],
+        ]
+
+        with patch(
+            "src.utils.supabase_client.get_supabase_client",
+            return_value=cliente,
+        ):
+            resultado = list_storage_folders(
+                bucket="Bronze",
+                folder="tmdb",
+                page_size=2,
+            )
+
+        self.assertEqual(len(resultado), 3)
+        self.assertEqual(storage.list.call_count, 2)
+
+        self.assertEqual(
+            storage.list.call_args_list[1]
+            .kwargs["options"]["offset"],
+            2,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
