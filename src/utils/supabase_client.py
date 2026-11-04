@@ -105,6 +105,98 @@ def upload_file_to_storage(
 
     return response
 
+## FUNCION QUE BUSCA EL ARCHIVO PAGINA POR PAGINA
+
+def storage_file_exists(
+    bucket: str,
+    remote_path: str,
+) -> bool:
+
+    supabase = get_supabase_client()
+
+    carpeta, nombre = remote_path.rsplit("/", 1)
+
+    storage = supabase.storage.from_(bucket)
+
+    limite = 100
+    offset = 0
+
+    while True:
+        objetos = storage.list(
+            path=carpeta,
+            options={
+                "limit": limite,
+                "offset": offset,
+                "sortBy": {
+                    "column": "name",
+                    "order": "asc"
+                }
+            }
+        )
+
+        if any(
+            objeto.get("name") == nombre
+            for objeto in objetos
+        ):
+            return True
+
+        if len(objetos) < limite:
+            return False
+
+        offset += limite
+
+
+def list_storage_filenames(
+    bucket: str,
+    folder: str,
+    page_size: int = 100,
+) -> set[str]:
+    """
+    Obtiene los nombres de todos los archivos de
+    una carpeta de Supabase Storage.
+
+    Consulta las páginas y devuelve un conjunto
+    para realizar búsquedas eficientes.
+    """
+
+    if page_size < 1:
+        raise ValueError(
+            "page_size debe ser mayor que cero"
+        )
+
+    supabase = get_supabase_client()
+    storage = supabase.storage.from_(bucket)
+
+    nombres = set()
+    offset = 0
+
+    while True:
+        objetos = storage.list(
+            path=folder,
+            options={
+                "limit": page_size,
+                "offset": offset,
+                "sortBy": {
+                    "column": "name",
+                    "order": "asc",
+                },
+            },
+        )
+
+        for objeto in objetos:
+            nombre = objeto.get("name")
+
+            # Excluir entradas de subdirectorios
+            if nombre and objeto.get("id") is not None:
+                nombres.add(nombre)
+
+        if len(objetos) < page_size:
+            break
+
+        offset += page_size
+
+    return nombres
+
 
 ### FUNCION QUE DESCARGA UN ARCHIVO DESDE SUPABASE 
 
@@ -131,3 +223,65 @@ def download_file_from_storage(
         file.write(data)
 
     return local_path
+
+
+### FUNCION QUE CONSTRUYE LA RUTA ESTABLE DE UNA PELICULA  EN SUPABASE STORAGE
+
+def build_tmdb_movie_path(tmdb_id: int) -> str:
+
+    if not isinstance(tmdb_id, int) or isinstance(tmdb_id, bool):
+        raise TypeError("tmdb_id debe ser un entero")
+
+    if tmdb_id <= 0:
+        raise ValueError("tmdb_id debe ser positivo")
+
+    return f"tmdb/movies/movie_{tmdb_id}.json"
+
+
+
+def list_tmdb_legacy_files(
+    bucket: str = "Bronze",
+) -> list[dict]:
+    """
+    Identifica archivos TMDb de las carpetas
+    antiguas ingestion_date=YYYY-MM-DD.
+
+    No modifica archivos en Supabase.
+    """
+
+    supabase = get_supabase_client()
+    storage = supabase.storage.from_(bucket)
+
+    carpetas = storage.list(path="tmdb")
+
+    inventario = []
+
+    for carpeta in carpetas:
+        nombre = carpeta.get("name", "")
+
+        if not nombre.startswith("ingestion_date="):
+            continue
+
+        ruta_carpeta = f"tmdb/{nombre}"
+
+        archivos = list_storage_filenames(
+            bucket=bucket,
+            folder=ruta_carpeta,
+        )
+
+        for archivo in sorted(archivos):
+            if (
+                archivo.startswith("movie_")
+                and archivo.endswith(".json")
+            ):
+                inventario.append({
+                    "archivo": archivo,
+                    "ruta_antigua": (
+                        f"{ruta_carpeta}/{archivo}"
+                    ),
+                    "fecha_carpeta": nombre.replace(
+                        "ingestion_date=", ""
+                    ),
+                })
+
+    return inventario

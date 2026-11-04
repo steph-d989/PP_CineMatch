@@ -12,6 +12,7 @@ from datetime import date
 from src.utils.supabase_client import (
     build_storage_path,
     upload_file_to_storage,
+    list_storage_filenames,
 )
 
 from src.validation.data_quality import (
@@ -62,7 +63,7 @@ def extract_tmdb_movie(
         "append_to_response": "credits,keywords",
     }
 
-    url = f"{TMDB_BASE_URL}/{tmdb_id}"
+    url = f"{TMDB_BASE_URL}/movie/{tmdb_id}"
 
     respuesta = requests.get(
         url,
@@ -126,6 +127,7 @@ def extract_tmdb_movies(
     exitosos = 0
     existentes = 0
     errores = []
+    archivos_nuevos = []
 
     for i, tmdb_id in enumerate(
         ids_procesar,
@@ -153,10 +155,12 @@ def extract_tmdb_movies(
                 token,
             )
 
-            save_tmdb_raw(
+            archivo_guardado = save_tmdb_raw(
                 tmdb_id,
                 data,
             )
+
+            archivos_nuevos.append(archivo_guardado)
 
             exitosos += 1
 
@@ -186,6 +190,7 @@ def extract_tmdb_movies(
         "exitosos": exitosos,
         "existentes": existentes,
         "errores": errores,
+        "archivos_nuevos": archivos_nuevos,
     }
 
 
@@ -260,13 +265,24 @@ def upload_tmdb_to_supabase(
 
     ingestion_date = date.today().isoformat()
 
+    carpeta_remota = (
+        f"tmdb/ingestion_date={ingestion_date}"
+    )
+
     resultados = {
         "archivos_subidos": 0,
+        "archivos_existentes": 0,
         "metadata_subida": False,
         "errores": [],
     }
 
-    # Subir películas
+    # Consultar una sola vez todas las páginas
+    # de la carpeta remota
+    archivos_remotos = list_storage_filenames(
+        bucket="Bronze",
+        folder=carpeta_remota,
+    )
+
     for archivo in archivos:
 
         remote_path = build_storage_path(
@@ -274,6 +290,13 @@ def upload_tmdb_to_supabase(
             ingestion_date=ingestion_date,
             filename=archivo.name,
         )
+
+        if archivo.name in archivos_remotos:
+            resultados["archivos_existentes"] += 1
+            print(
+                f"{archivo.name}: ya existe en Supabase"
+            )
+            continue
 
         try:
             upload_file_to_storage(
@@ -285,13 +308,24 @@ def upload_tmdb_to_supabase(
 
             resultados["archivos_subidos"] += 1
 
+            # Evitar duplicados dentro de la ejecución
+            archivos_remotos.add(archivo.name)
+
+            print(
+                f"{archivo.name}: subido correctamente"
+            )
+
         except Exception as error:
             resultados["errores"].append({
                 "archivo": archivo.name,
                 "error": str(error),
             })
 
-    # Subir metadata
+            print(
+                f"{archivo.name}: ERROR - {error}"
+            )
+
+    # Actualizar metadatos diarios
     remote_metadata = build_storage_path(
         source="tmdb",
         ingestion_date=ingestion_date,
@@ -303,7 +337,7 @@ def upload_tmdb_to_supabase(
             bucket="Bronze",
             local_path=ruta_metadata,
             remote_path=remote_metadata,
-            upsert=False,
+            upsert=True,
         )
 
         resultados["metadata_subida"] = True
@@ -315,7 +349,6 @@ def upload_tmdb_to_supabase(
         })
 
     return resultados
-
 
 ### FUNCION PARA ALMACENAR LA METADATA
 
@@ -408,7 +441,7 @@ def run_tmdb_ingestion(
     )
     
     archivos_tmdb = list(
-    BRONZE_TMDB_DIR.glob("movie_*.json")
+        BRONZE_TMDB_DIR.glob("movie_*.json")
     )
 
     print("\nSubiendo TMDb a Supabase Storage...")

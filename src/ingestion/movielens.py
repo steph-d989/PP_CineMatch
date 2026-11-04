@@ -22,48 +22,71 @@ from src.utils.config import MOVIELENS_URL
 
 ### FUNCION PARA DESCARGAR ARCHIVO ZIP DE MOVIELENS
 
+
 def download_movielens(
-    url: str = MOVIELENS_URL, #Desde donde descarga
-    force_download: bool = False #Indica si tenemos carpeta con el mismo nombre no volver a descargar
+    url: str = MOVIELENS_URL,
+    force_download: bool = False
 ) -> Path:
 
-
-    BRONZE_MOVIELENS_DIR.mkdir( # Crea la carpeta bronze si no la tenemos
-        parents=True, # Permite crear carpetas padre si hace falta
-        exist_ok=True # Evita errores si la capeta ya existe
+    BRONZE_MOVIELENS_DIR.mkdir(
+        parents=True,
+        exist_ok=True
     )
 
-    ruta_zip = BRONZE_MOVIELENS_DIR / "ml-32m.zip" # Donde guardamos el ZIP
+    ruta_zip = BRONZE_MOVIELENS_DIR / "ml-32m.zip"
+    ruta_temporal = BRONZE_MOVIELENS_DIR / "ml-32m.zip.part"
 
-    if ruta_zip.exists() and not force_download: # Si el ZIP existe no descargar
-        print("MovieLens ya está descargado.")
-        print("Ruta:", ruta_zip)
-        return ruta_zip
+    # Verificar el ZIP existente
+    if ruta_zip.exists() and not force_download:
+
+        if zipfile.is_zipfile(ruta_zip):
+            print("MovieLens ya está descargado.")
+            return ruta_zip
+
+        print("ZIP existente inválido. Se descargará nuevamente.")
 
     print("Descargando MovieLens 32M...")
 
-    with requests.get( # Consulta URL
-        url,
-        stream=True, # No carga todo el archivo en RAM de una sola vez
-        timeout=60 # Evita que una conexion congelada espere infinitamente
-    ) as respuesta:
+    try:
+        with requests.get(
+            url,
+            stream=True,
+            timeout=60
+        ) as respuesta:
 
-        respuesta.raise_for_status() # Si devuelve un error 404 500 503 ....
+            respuesta.raise_for_status()
 
-        with open(ruta_zip, "wb") as archivo:
+            with open(ruta_temporal, "wb") as archivo:
+                for bloque in respuesta.iter_content(
+                    chunk_size=1024 * 1024
+                ):
+                    if bloque:
+                        archivo.write(bloque)
 
-            for bloque in respuesta.iter_content(
-                chunk_size=1024 * 1024  # Descarga el archivo por bloques de 1MB
-            ):
-                if bloque:
-                    archivo.write(bloque)
+        # Verificar integridad del ZIP
+        with zipfile.ZipFile(ruta_temporal, "r") as z:
+            archivo_corrupto = z.testzip()
 
-    print("Descarga completada.")
+            if archivo_corrupto is not None:
+                raise ValueError(
+                    f"Archivo corrupto: {archivo_corrupto}"
+                )
 
-    return ruta_zip
+        # Reemplazar únicamente después de validar
+        ruta_temporal.replace(ruta_zip)
+
+        print("Descarga completada y verificada.")
+
+        return ruta_zip
+
+    finally:
+        # Eliminar descarga parcial
+        if ruta_temporal.exists():
+            ruta_temporal.unlink()
 
 
 ### FUNCION PARA DESCOMPRIMIR
+
 
 def extract_movielens(
     ruta_zip: Path,
@@ -73,16 +96,46 @@ def extract_movielens(
     destino = BRONZE_MOVIELENS_DIR
     carpeta_dataset = destino / "ml-32m"
 
-    # Si los archivos ya fueron extraidos no lo vuleve a hacer 
-    if carpeta_dataset.exists() and not force_extract:
+    archivos_esperados = [
+        "movies.csv",
+        "ratings.csv",
+        "tags.csv",
+        "links.csv",
+        "genome-scores.csv",
+        "genome-tags.csv",
+    ]
+
+    archivos_completos = all(
+        (carpeta_dataset / nombre).is_file()
+        for nombre in archivos_esperados
+    )
+
+    if archivos_completos and not force_extract:
         print("MovieLens ya está extraído.")
-        print("Ruta:", carpeta_dataset)
         return carpeta_dataset
+
+    print("Verificando archivo ZIP...")
+
+    if not zipfile.is_zipfile(ruta_zip):
+        raise ValueError(
+            "El archivo MovieLens no es un ZIP válido."
+        )
 
     print("Extrayendo MovieLens...")
 
     with zipfile.ZipFile(ruta_zip, "r") as archivo_zip:
         archivo_zip.extractall(destino)
+
+    archivos_faltantes = [
+        nombre
+        for nombre in archivos_esperados
+        if not (carpeta_dataset / nombre).is_file()
+    ]
+
+    if archivos_faltantes:
+        raise FileNotFoundError(
+            f"Archivos faltantes: {archivos_faltantes}"
+        )
 
     print("MovieLens extraído correctamente.")
 
@@ -140,46 +193,32 @@ def validate_movielens(
 
 ### FUNCION QUE SUBE DE BRONZE A SUPABASE STORAGE
 
+
 def upload_movielens_to_supabase(
-    # ruta_zip: Path,
     ruta_metadata: Path,
 ) -> dict:
 
     ingestion_date = date.today().isoformat()
 
-    resultados = {}
-    
-
-    # ZIP original
-    # remote_zip = build_storage_path(
-    #    source="movielens",
-    #    ingestion_date=ingestion_date,
-    #    filename=ruta_zip.name,
-    #)
-
-    #resultados["zip"] = upload_file_to_storage(
-    #    bucket="Bronze",
-    #    local_path=ruta_zip,
-    #    remote_path=remote_zip,
-    #    upsert=False,
-    #)
-
-
-    # Metadata
+    # Construimos la ruta en Supabase
     remote_metadata = build_storage_path(
         source="movielens",
         ingestion_date=ingestion_date,
         filename=ruta_metadata.name,
     )
 
-    resultados["metadata"] = upload_file_to_storage(
+    # Los metadatos se pueden actualizar
+    respuesta = upload_file_to_storage(
         bucket="Bronze",
         local_path=ruta_metadata,
         remote_path=remote_metadata,
-        upsert=False,
+        upsert=True,
     )
 
-    return resultados
+    return {
+        "metadata": respuesta,
+        "remote_path": remote_metadata,
+    }
 
 
 ### FUNCION PARA METADATA
@@ -254,7 +293,22 @@ def run_movielens_ingestion(
         carpeta_dataset
     )
 
+    archivos_invalidos = [
+        nombre
+        for nombre, info in validacion.items()
+        if not info["existe"] or not info["csv_valido"]
+    ]
+
+    if archivos_invalidos:
+        raise RuntimeError(
+            "Validación MovieLens fallida. "
+            f"Archivos inválidos: {archivos_invalidos}"
+        )
+
+    print("Validación MovieLens completada correctamente.")
+
     ruta_metadata = save_metadata(validacion)
+
 
     print("\nSubiendo MovieLens a Supabase Storage...")
 
