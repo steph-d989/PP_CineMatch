@@ -1,7 +1,7 @@
 import mimetypes
 import os
 from pathlib import Path
-
+from uuid import UUID
 from dotenv import load_dotenv
 from supabase import Client, create_client
 
@@ -395,3 +395,80 @@ def list_storage_folders(
 
     return carpetas
 
+
+def build_watchmode_movie_path(
+    tmdb_id: int,
+    region: str = "PE",
+) -> str:
+    """
+    Construye una ruta estable de Watchmode
+    identificando película y región.
+    """
+
+    if (
+        not isinstance(tmdb_id, int)
+        or isinstance(tmdb_id, bool)
+    ):
+        raise TypeError("tmdb_id debe ser un entero")
+
+    if tmdb_id <= 0:
+        raise ValueError("tmdb_id debe ser positivo")
+
+    if (
+        not isinstance(region, str)
+        or len(region) != 2
+        or not region.isalpha()
+    ):
+        raise ValueError(
+            "region debe tener dos letras"
+        )
+
+    region = region.upper()
+
+    return (
+        f"watchmode/regions/{region}/"
+        f"movie_{tmdb_id}_sources.json"
+    )
+
+def build_watchmode_history_paths(
+    tmdb_id: int,
+    region: str,
+    version_id: str,
+) -> dict:
+    """
+    Construye rutas para almacenar una versión
+    histórica de Watchmode.
+
+    No modifica Supabase.
+    """
+
+    if (
+        not isinstance(tmdb_id, int)
+        or isinstance(tmdb_id, bool)
+        or tmdb_id <= 0
+    ):
+        raise ValueError(
+            "tmdb_id debe ser un entero positivo"
+        )
+
+    if (
+        not isinstance(region, str)
+        or len(region) != 2
+        or not region.isalpha()
+    ):
+        raise ValueError("Región inválida")
+
+    region = region.upper()
+
+    # Validar identificador de versión
+    version = str(UUID(version_id))
+
+    base = (
+        f"watchmode/history/{region}/"
+        f"movie_{tmdb_id}/version_{version}"
+    )
+
+    return {
+        "json": f"{base}/sources.json",
+        "metadata": f"{base}/metadata.json",
+    }

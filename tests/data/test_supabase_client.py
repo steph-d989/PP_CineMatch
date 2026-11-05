@@ -7,7 +7,9 @@ from src.utils.supabase_client import (
     build_tmdb_movie_path,
     list_tmdb_legacy_files,
     plan_tmdb_migration,
-    list_storage_folders
+    list_storage_folders,
+    build_watchmode_movie_path,
+    build_watchmode_history_paths,
 )
 
 
@@ -348,6 +350,69 @@ class SupabaseClientTests(unittest.TestCase):
             .kwargs["options"]["offset"],
             2,
         )
+
+    
+    def test_ruta_regional_watchmode(self):
+
+        ruta = build_watchmode_movie_path(
+            tmdb_id=550,
+            region="PE",
+        )
+
+        self.assertEqual(
+            ruta,
+            "watchmode/regions/PE/movie_550_sources.json"
+        )
+
+        # Normalización de región
+        self.assertEqual(
+            build_watchmode_movie_path(550, "pe"),
+            ruta,
+        )
+
+        # Identificador inválido
+        with self.assertRaises(ValueError):
+            build_watchmode_movie_path(0, "PE")
+
+        # Región inválida
+        with self.assertRaises(ValueError):
+            build_watchmode_movie_path(550, "PER")
+
+        
+    
+    def test_rutas_historicas_watchmode(self):
+
+        version_id = (
+            "123e4567-e89b-42d3-a456-426614174000"
+        )
+
+        rutas = build_watchmode_history_paths(
+            tmdb_id=550,
+            region="pe",
+            version_id=version_id,
+        )
+
+        base = (
+            "watchmode/history/PE/movie_550/"
+            f"version_{version_id}"
+        )
+
+        self.assertEqual(
+            rutas["json"],
+            f"{base}/sources.json"
+        )
+
+        self.assertEqual(
+            rutas["metadata"],
+            f"{base}/metadata.json"
+        )
+
+        with self.assertRaises(ValueError):
+            build_watchmode_history_paths(
+                tmdb_id=0,
+                region="PE",
+                version_id=version_id,
+            )
 
 
 if __name__ == "__main__":
