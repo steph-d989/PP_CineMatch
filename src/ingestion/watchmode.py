@@ -2286,9 +2286,21 @@ def backup_watchmode_remote_version(
 
     datos_metadata = json.loads(metadata_original)
 
+    # Calcular la huella digital del JSON descargado.
     hash_original = hashlib.sha256(
         json_original
     ).hexdigest()
+    
+    # Confirmar que el contenido descargado corresponde
+    # a la versión que autorizamos para el respaldo.
+    if (
+        expected_sha256 is not None
+        and hash_original != expected_sha256.lower()
+    ):
+        raise RuntimeError(
+            "Respaldo bloqueado: el contenido remoto "
+            "cambió después de la verificación inicial"
+        )
 
     if (
         not isinstance(datos_metadata, dict)
@@ -2303,6 +2315,38 @@ def backup_watchmode_remote_version(
         )
 
     
+
+    datos_metadata = json.loads(metadata_original)
+
+    # 1. Calcular SHA-256 del contenido descargado.
+    hash_original = hashlib.sha256(
+        json_original
+    ).hexdigest()
+
+    # 2. Validar identidad e integridad del paquete remoto.
+    if (
+        not isinstance(datos_metadata, dict)
+        or datos_metadata.get("tmdb_id") != tmdb_id
+        or datos_metadata.get("region") != region
+        or datos_metadata.get("region_verified") is not True
+        or datos_metadata.get("sha256") != hash_original
+    ):
+        raise ValueError(
+            "La versión remota no superó "
+            "la validación de integridad"
+        )
+
+    # 3. Comprobar que sigue siendo la versión planificada.
+    if (
+        expected_sha256 is not None
+        and hash_original != expected_sha256.lower()
+    ):
+        raise RuntimeError(
+            "Respaldo bloqueado: el contenido remoto "
+            "cambió después de la verificación inicial"
+        )
+
+    # 4. Crear el respaldo histórico.
     try:
         storage.copy(
             rutas_actuales["json"],
@@ -2969,18 +3013,30 @@ def execute_watchmode_backup_plan(
             continue
 
         try:
+            
             respaldo = backup_watchmode_remote_version(
                 tmdb_id=tmdb_id,
                 region=region,
                 expected_sha256=hash_esperado,
             )
 
+            # Aceptar únicamente respaldos verificados.
+            if (
+                not isinstance(respaldo, dict)
+                or respaldo.get("estado") != "verified"
+            ):
+                raise RuntimeError(
+                    "El respaldo histórico no fue verificado"
+                )
+
             resultados.append({
                 "archivo": archivo,
                 "estado": "backup_completed",
                 "respaldo": respaldo,
             })
+
             exitosos += 1
+
 
         except Exception as exc:
             resultados.append({

@@ -45,6 +45,320 @@ from src.ingestion.watchmode import (
 class WatchmodeTests(unittest.TestCase):
     
     
+    def test_sync_paquete_incompleto_por_error_metadata(self):
+
+        from pathlib import Path
+
+        paquete = {
+            "json_local": Path("movie_550_sources.json"),
+            "metadata_local": Path(
+                "movie_550_sources_metadata.json"
+            ),
+            "json_remoto": (
+                "watchmode/regions/PE/"
+                "movie_550_sources.json"
+            ),
+            "metadata_remoto": (
+                "watchmode/regions/PE/"
+                "movie_550_sources_metadata.json"
+            ),
+        }
+
+        plan = {
+            "region": "PE",
+            "preparados": [paquete],
+            "existentes": [],
+            "errores": [],
+        }
+
+        with (
+            patch(
+                "src.ingestion.watchmode."
+                "prepare_watchmode_sync_bundles",
+                return_value=plan,
+            ),
+            patch(
+                "src.ingestion.watchmode."
+                "upload_file_to_storage",
+                side_effect=[
+                    {"status": "success"},
+                    RuntimeError(
+                        "Error simulado al subir metadata"
+                    ),
+                ],
+            ) as mock_upload,
+            patch(
+                "src.ingestion.watchmode."
+                "verify_uploaded_watchmode_bundle"
+            ) as mock_verificacion,
+        ):
+
+            resultado = sync_watchmode_bundles(
+                region="PE"
+            )
+
+        # El JSON se intentó subir correctamente,
+        # pero los metadatos fallaron.
+        self.assertEqual(
+            mock_upload.call_count,
+            2
+        )
+
+        # No debe verificar un paquete incompleto.
+        mock_verificacion.assert_not_called()
+
+        # Ningún paquete debe contarse como completo.
+        self.assertEqual(
+            resultado["paquetes_subidos"],
+            0
+        )
+
+        self.assertEqual(
+            resultado["paquetes_fallidos"],
+            1
+        )
+
+        self.assertEqual(
+            resultado["estado"],
+            "partial"
+        )
+
+        self.assertEqual(
+            len(resultado["errores"]),
+            1
+        )
+
+        self.assertIn(
+            "Error simulado al subir metadata",
+            resultado["errores"][0]["error"],
+        )
+
+    
+    def test_inspeccion_detecta_metadata_recuperable(self):
+
+        import hashlib
+        import json
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from unittest.mock import MagicMock, patch
+
+        contenido_json = b'[{"name": "Netflix"}]'
+
+        hash_local = hashlib.sha256(
+            contenido_json
+        ).hexdigest()
+
+        with TemporaryDirectory() as temporal:
+
+            carpeta = Path(temporal)
+
+            archivo_json = (
+                carpeta / "movie_550_sources.json"
+            )
+
+            archivo_metadata = (
+                carpeta / "movie_550_sources_metadata.json"
+            )
+
+            archivo_json.write_bytes(contenido_json)
+
+            archivo_metadata.write_text(
+                json.dumps({
+                    "tmdb_id": 550,
+                    "region": "PE",
+                    "region_verified": True,
+                    "sha256": hash_local,
+                }),
+                encoding="utf-8",
+            )
+
+            ruta_remota = (
+                "watchmode/regions/PE/"
+                "movie_550_sources.json"
+            )
+
+            plan = {
+                "region": "PE",
+                "incompletos": [
+                    {
+                        "archivo": archivo_json.name,
+                        "origen": str(archivo_json),
+                        "destino": ruta_remota,
+                        "json_existe": True,
+                        "metadata_existe": False,
+                    }
+                ],
+            }
+
+            cliente = MagicMock()
+
+            storage = cliente.storage.from_.return_value
+
+            storage.download.return_value = (
+                contenido_json
+            )
+
+            with patch(
+                "src.ingestion.watchmode."
+                "get_supabase_client",
+                return_value=cliente,
+            ):
+
+                resultado = (
+                    inspect_incomplete_watchmode_bundles(
+                        region="PE",
+                        plan=plan,
+                    )
+                )
+
+        self.assertEqual(
+            resultado["region"],
+            "PE"
+        )
+
+        self.assertEqual(
+            len(resultado["recuperables"]),
+            1
+        )
+
+        self.assertEqual(
+            resultado["conflictos"],
+            []
+        )
+
+        self.assertEqual(
+            resultado["errores"],
+            []
+        )
+
+        recuperable = resultado["recuperables"][0]
+
+        self.assertEqual(
+            recuperable["archivo"],
+            "movie_550_sources.json"
+        )
+
+        self.assertEqual(
+            recuperable["tipo"],
+            "metadata_missing"
+        )
+
+        self.assertEqual(
+            recuperable["remote_path"],
+            "watchmode/regions/PE/"
+            "movie_550_sources_metadata.json"
+        )
+
+        storage.download.assert_called_once_with(
+            ruta_remota
+        )
+
+        storage.upload.assert_not_called()
+
+    
+    def test_recuperacion_sube_solo_metadata_faltante(self):
+
+        import hashlib
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from unittest.mock import patch, MagicMock
+
+        contenido_metadata = (
+            b'{"tmdb_id":550,"region":"PE"}'
+        )
+
+        ruta_remota_metadata = (
+            "watchmode/regions/PE/"
+            "movie_550_sources_metadata.json"
+        )
+
+        with TemporaryDirectory() as temporal:
+
+            archivo_metadata = (
+                Path(temporal)
+                / "movie_550_sources_metadata.json"
+            )
+
+            archivo_metadata.write_bytes(
+                contenido_metadata
+            )
+
+            diagnostico = {
+                "region": "PE",
+                "recuperables": [
+                    {
+                        "archivo": "movie_550_sources.json",
+                        "tipo": "metadata_missing",
+                        "local_path": str(archivo_metadata),
+                        "remote_path": ruta_remota_metadata,
+                    }
+                ],
+                "conflictos": [],
+                "errores": [],
+            }
+
+            cliente = MagicMock()
+
+            storage = cliente.storage.from_.return_value
+
+            # Simular que la descarga remota devuelve
+            # exactamente el archivo recién subido.
+            storage.download.return_value = (
+                contenido_metadata
+            )
+
+            with (
+                patch(
+                    "src.ingestion.watchmode."
+                    "inspect_incomplete_watchmode_bundles",
+                    return_value=diagnostico,
+                ),
+                patch(
+                    "src.ingestion.watchmode."
+                    "upload_file_to_storage"
+                ) as mock_upload,
+                patch(
+                    "src.ingestion.watchmode."
+                    "get_supabase_client",
+                    return_value=cliente,
+                ),
+            ):
+
+                resultado = (
+                    recover_incomplete_watchmode_bundles(
+                        region="PE"
+                    )
+                )
+
+            # Se sube exclusivamente el archivo faltante.
+            mock_upload.assert_called_once_with(
+                bucket="Bronze",
+                local_path=archivo_metadata,
+                remote_path=ruta_remota_metadata,
+                upsert=False,
+            )
+
+            # Se descarga para comprobar integridad.
+            storage.download.assert_called_once_with(
+                ruta_remota_metadata
+            )
+
+        self.assertEqual(
+            resultado["recuperados"],
+            1
+        )
+
+        self.assertEqual(
+            resultado["fallidos"],
+            0
+        )
+
+        self.assertEqual(
+            resultado["errores"],
+            []
+        )
+
+    
     def test_respaldo_bloquea_autorizacion_invalida(self):
 
         plan = {
@@ -93,6 +407,121 @@ class WatchmodeTests(unittest.TestCase):
         mock_backup.assert_not_called()
 
     
+    def test_respaldo_bloquea_cambio_entre_verificaciones(self):
+
+        import hashlib
+
+        contenido_original = b'[{"name": "Netflix"}]'
+        contenido_modificado = b'[{"name": "Prime Video"}]'
+
+        hash_esperado = hashlib.sha256(
+            contenido_original
+        ).hexdigest()
+
+        hash_modificado = hashlib.sha256(
+            contenido_modificado
+        ).hexdigest()
+
+        metadata_modificada = json.dumps({
+            "tmdb_id": 550,
+            "region": "PE",
+            "region_verified": True,
+            "sha256": hash_modificado,
+        }).encode("utf-8")
+
+        cliente = MagicMock()
+        storage = cliente.storage.from_.return_value
+
+        storage.download.side_effect = [
+            contenido_modificado,
+            metadata_modificada,
+        ]
+
+        with (
+            patch(
+                "src.ingestion.watchmode."
+                "verify_watchmode_remote_unchanged",
+                return_value={
+                    "unchanged": True,
+                    "reason": None,
+                    "sha256": hash_esperado,
+                },
+            ),
+            patch(
+                "src.ingestion.watchmode.get_supabase_client",
+                return_value=cliente,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "cambió después de la verificación",
+            ):
+                backup_watchmode_remote_version(
+                    tmdb_id=550,
+                    region="PE",
+                    expected_sha256=hash_esperado,
+                )
+
+        storage.copy.assert_not_called()
+
+    
+    def test_ejecutor_rechaza_respaldo_no_verificado(self):
+
+        plan = {
+            "region": "PE",
+            "autorizados": [
+                {
+                    "archivo": "movie_550_sources.json",
+                    "estado": "pending_backup",
+                    "accion": "backup_required",
+                    "expected_remote_sha256": "a" * 64,
+                }
+            ],
+        }
+
+        with patch(
+            "src.ingestion.watchmode."
+            "backup_watchmode_remote_version",
+            return_value={
+                "estado": "partial",
+                "tmdb_id": 550,
+            },
+        ) as mock_backup:
+
+            resultado = execute_watchmode_backup_plan(
+                update_plan=plan,
+                region="PE",
+                dry_run=False,
+            )
+
+        mock_backup.assert_called_once()
+
+        self.assertEqual(
+            resultado["exitosos"],
+            0
+        )
+
+        self.assertEqual(
+            resultado["errores"],
+            1
+        )
+
+        self.assertEqual(
+            resultado["estado"],
+            "partial"
+        )
+
+        self.assertEqual(
+            resultado["resultados"][0]["estado"],
+            "backup_failed"
+        )
+
+        self.assertIn(
+            "no fue verificado",
+            resultado["resultados"][0]["motivo"],
+        )
+
+    
     def test_ejecutor_transmite_hash_al_respaldo(self):
 
         hash_remoto = "b" * 64
@@ -110,7 +539,7 @@ class WatchmodeTests(unittest.TestCase):
         }
 
         respaldo_simulado = {
-            "estado": "success",
+            "estado": "verified",
             "tmdb_id": 550,
         }
 
