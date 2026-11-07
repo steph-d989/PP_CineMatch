@@ -345,8 +345,14 @@ def run_movielens_ingestion(
     print("=" * 50)
     print("FIN INGESTA MOVIELENS")
     print("=" * 50)
+    
+    return {
+        "estado": "success",
+        "fuente": "MovieLens",
+        "validacion": validacion,
+        "supabase": upload_result,
+    }
 
-    return validacion
 
 if __name__ == "__main__":
     run_movielens_ingestion()

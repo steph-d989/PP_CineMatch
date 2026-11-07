@@ -1474,18 +1474,27 @@ def prepare_watchmode_sync_bundles(
     }
 
 
+
 def inspect_incomplete_watchmode_bundles(
     region: str = "PE",
+    plan: dict | None = None,
 ) -> dict:
     """
     Inspecciona paquetes incompletos en Supabase.
 
-    Solo realiza lecturas.
-    No sube ni elimina archivos.
-    No consulta la API de Watchmode.
+    Permite reutilizar un plan previamente
+    calculado para evitar consultas duplicadas.
+
+    No modifica archivos ni consulta Watchmode.
     """
 
-    plan = plan_watchmode_sync(region=region)
+    if plan is None:
+        plan = plan_watchmode_sync(region=region)
+
+    elif plan.get("region") != region.upper():
+        raise ValueError(
+            "La región del plan no coincide"
+        )
 
     resultados = {
         "region": plan["region"],
@@ -1670,20 +1679,30 @@ def recover_incomplete_watchmode_bundles(
     return resultado
 
 
+
 def audit_complete_watchmode_bundles(
     region: str = "PE",
+    plan: dict | None = None,
 ) -> dict:
     """
-    Audita paquetes completos en Supabase.
+    Audita los paquetes completos de Watchmode.
 
-    Comprueba que el JSON remoto coincida
-    con el SHA-256 declarado en sus metadatos.
+    Permite reutilizar un plan existente para
+    evitar consultas duplicadas al inventario.
 
-    No modifica archivos.
-    No consulta la API Watchmode.
+    Solo realiza lecturas a Supabase.
+    No consulta la API de Watchmode.
     """
 
-    plan = plan_watchmode_sync(region=region)
+    region = region.upper()
+
+    if plan is None:
+        plan = plan_watchmode_sync(region=region)
+
+    elif plan.get("region") != region:
+        raise ValueError(
+            "La región del plan no coincide"
+        )
 
     resultados = {
         "region": plan["region"],
@@ -1766,6 +1785,54 @@ def audit_complete_watchmode_bundles(
     return resultados
 
 
+def verify_uploaded_watchmode_bundle(
+    paquete: dict,
+) -> dict:
+    """
+    Verifica que el JSON y sus metadatos
+    se hayan almacenado correctamente.
+
+    Solo realiza lecturas a Supabase.
+    No consulta la API Watchmode.
+    """
+
+    storage = get_supabase_client().storage.from_("Bronze")
+
+    archivos = [
+        ("json_local", "json_remoto"),
+        ("metadata_local", "metadata_remoto"),
+    ]
+
+    for clave_local, clave_remota in archivos:
+
+        ruta_local = Path(paquete[clave_local])
+        ruta_remota = paquete[clave_remota]
+
+        hash_local = hashlib.sha256(
+            ruta_local.read_bytes()
+        ).hexdigest()
+
+        contenido_remoto = storage.download(
+            ruta_remota
+        )
+
+        hash_remoto = hashlib.sha256(
+            contenido_remoto
+        ).hexdigest()
+
+        if hash_local != hash_remoto:
+            return {
+                "valid": False,
+                "error": "sha256_mismatch",
+                "archivo": ruta_remota,
+            }
+
+    return {
+        "valid": True,
+        "error": None,
+    }
+
+
 def sync_watchmode_bundles(
     region: str = "PE",
 ) -> dict:
@@ -1773,6 +1840,7 @@ def sync_watchmode_bundles(
     Sincroniza paquetes JSON + metadatos
     preparados hacia Supabase Storage.
 
+    Verifica ambos archivos después de subirlos.
     No consulta la API de Watchmode.
     """
 
@@ -1790,6 +1858,7 @@ def sync_watchmode_bundles(
     for paquete in plan["preparados"]:
 
         try:
+            # 1. Subir JSON de disponibilidad
             upload_file_to_storage(
                 bucket="Bronze",
                 local_path=paquete["json_local"],
@@ -1797,6 +1866,7 @@ def sync_watchmode_bundles(
                 upsert=False,
             )
 
+            # 2. Subir metadatos de procedencia
             upload_file_to_storage(
                 bucket="Bronze",
                 local_path=paquete["metadata_local"],
@@ -1804,15 +1874,48 @@ def sync_watchmode_bundles(
                 upsert=False,
             )
 
+            # 3. Verificar integridad de ambas subidas
+            verificacion = verify_uploaded_watchmode_bundle(
+                paquete
+            )
+
+            if not verificacion["valid"]:
+                raise RuntimeError(
+                    "Verificación del paquete fallida: "
+                    f"{verificacion['error']} - "
+                    f"{verificacion.get('archivo', 'desconocido')}"
+                )
+
+            # Solo contabilizar paquetes verificados
             resultados["paquetes_subidos"] += 1
 
+            print(
+                f"{paquete['json_local'].name}: "
+                "sincronizado y verificado"
+            )
+
         except Exception as error:
+
             resultados["paquetes_fallidos"] += 1
 
             resultados["errores"].append({
                 "archivo": paquete["json_local"].name,
                 "error": str(error),
             })
+
+            print(
+                f"{paquete['json_local'].name}: "
+                f"ERROR - {error}"
+            )
+
+    # Evaluar el resultado global fuera del bucle
+    if (
+        resultados["errores"]
+        or resultados["paquetes_fallidos"] > 0
+    ):
+        resultados["estado"] = "partial"
+    else:
+        resultados["estado"] = "success"
 
     return resultados
 
@@ -1897,34 +2000,6 @@ def run_watchmode_ingestion(
         fecha_inicio,
         fecha_fin,
     )
-    
-    archivos_watchmode = list(
-        BRONZE_WATCHMODE_DIR.glob(
-            "movie_*_sources.json"
-        )
-    )
-
-    print("\nSubiendo Watchmode a Supabase Storage...")
-
-    resultado_supabase = upload_watchmode_to_supabase(
-        archivos_watchmode,
-        ruta_metadata,
-    )
-
-    print(
-        "Archivos subidos:",
-        resultado_supabase["archivos_subidos"]
-    )
-
-    print(
-        "Metadata subida:",
-        resultado_supabase["metadata_subida"]
-    )
-
-    print(
-        "Errores Supabase:",
-        len(resultado_supabase["errores"])
-    )
 
     print("\nResumen:")
     print(
@@ -1956,28 +2031,71 @@ def run_watchmode_ingestion(
     print("FIN INGESTA WATCHMODE")
     print("=" * 50)
 
+
+    errores_extraccion = len(
+        resultado_extraccion["errores"]
+    )
+
+    errores_validacion = len(
+        resultado_validacion["archivos_invalidos"]
+    )
+
+    total_errores = (
+        errores_extraccion
+        + errores_validacion
+    )
+
+    estado = (
+        "success"
+        if total_errores == 0
+        else "partial"
+    )
+
     return {
+        "estado": estado,
+        "fuente": "Watchmode",
+        "region": region.upper(),
         "extraccion": resultado_extraccion,
         "validacion": resultado_validacion,
+        "metadata_local": str(ruta_metadata),
+        "total_errores": total_errores,
     }
+
     
+
 
 def compare_watchmode_versions(
     region: str = "PE",
+    plan: dict | None = None,
+    auditoria: dict | None = None,
 ) -> dict:
     """
-    Compara versiones locales con paquetes
-    remotos completos e íntegros.
+    Compara versiones locales y remotas.
 
-    No modifica archivos.
-    No consulta la API Watchmode.
+    Reutiliza el plan y la auditoría cuando
+    son proporcionados por el coordinador.
+
+    No modifica archivos ni consulta Watchmode.
     """
 
-    auditoria = audit_complete_watchmode_bundles(
-        region=region
-    )
+    region = region.upper()
 
-    plan = plan_watchmode_sync(region=region)
+    if plan is None:
+        plan = plan_watchmode_sync(region=region)
+    elif plan.get("region") != region:
+        raise ValueError(
+            "La región del plan no coincide"
+        )
+
+    if auditoria is None:
+        auditoria = audit_complete_watchmode_bundles(
+            region=region,
+            plan=plan,
+        )
+    elif auditoria.get("region") != region:
+        raise ValueError(
+            "La región de la auditoría no coincide"
+        )
 
     archivos_verificados = {
         item["archivo"]: item
@@ -2052,6 +2170,17 @@ def compare_watchmode_versions(
                     "Fechas sin zona horaria"
                 )
 
+
+            # Determinar el orden temporal de versiones
+            if fecha_local > fecha_remota:
+                orden_temporal = "local_newer"
+
+            elif fecha_local < fecha_remota:
+                orden_temporal = "remote_newer"
+
+            else:
+                orden_temporal = "same_timestamp_conflict"
+
             resultados["diferentes"].append({
                 "archivo": nombre,
                 "hash_local": hash_local,
@@ -2061,7 +2190,9 @@ def compare_watchmode_versions(
                 "local_mas_reciente": (
                     fecha_local > fecha_remota
                 ),
+                "orden_temporal": orden_temporal,
             })
+
 
         except Exception as error:
             resultados["errores"].append({
@@ -2094,6 +2225,7 @@ class WatchmodeBackupError(RuntimeError):
 def backup_watchmode_remote_version(
     tmdb_id: int,
     region: str = "PE",
+    expected_sha256: str | None = None,
 ) -> dict:
     """
     Respalda una versión remota de Watchmode
@@ -2124,6 +2256,22 @@ def backup_watchmode_remote_version(
         region=region,
         version_id=version_id,
     )
+
+    # Verificación de concurrencia previa al respaldo
+    if expected_sha256 is not None:
+
+        verificacion = verify_watchmode_remote_unchanged(
+            tmdb_id=tmdb_id,
+            expected_sha256=expected_sha256,
+            region=region,
+        )
+
+        if not verificacion["unchanged"]:
+            raise RuntimeError(
+                "Respaldo bloqueado: la versión remota "
+                "no coincide con la versión planificada. "
+                f"Motivo: {verificacion['reason']}"
+            )
 
     storage = get_supabase_client().storage.from_("Bronze")
 
@@ -2332,6 +2480,596 @@ def inspect_watchmode_backup(
         resultado["estado"] = "missing"
 
     return resultado
+
+
+def diagnose_watchmode_sync(
+    region: str = "PE",
+) -> dict:
+    """
+    Diagnostica el estado de sincronización
+    sin modificar Supabase.
+
+    No consulta la API de Watchmode.
+    """
+
+    plan = plan_watchmode_sync(region=region)
+
+    return {
+        "estado": "success",
+        "region": plan["region"],
+        "pendientes": len(plan["pendientes"]),
+        "incompletos": len(plan["incompletos"]),
+        "existentes": len(plan["existentes"]),
+        "invalidos": len(plan["invalidos"]),
+        "modo": "dry_run",
+    }
+
+
+
+def coordinate_watchmode_sync(
+    region: str = "PE",
+) -> dict:
+    """
+    Coordina la clasificación de paquetes Watchmode.
+
+    Modo diagnóstico:
+    - No sube ni elimina archivos.
+    - No consulta la API de Watchmode.
+    - Consulta el inventario de Supabase.
+    """
+
+    plan = plan_watchmode_sync(region=region)
+
+    tareas = []
+
+    # 1. Paquetes nuevos
+    for item in plan["pendientes"]:
+        tareas.append({
+            "archivo": item["archivo"],
+            "accion": "upload_new",
+            "estado": "pending",
+        })
+
+    # 2. Paquetes incompletos
+    for item in plan["incompletos"]:
+        tareas.append({
+            "archivo": item["archivo"],
+            "accion": "inspect_incomplete",
+            "estado": "pending",
+        })
+
+    # 3. Paquetes completos pendientes de auditoría
+    for item in plan["existentes"]:
+        tareas.append({
+            "archivo": item["archivo"],
+            "accion": "audit_complete",
+            "estado": "pending",
+        })
+
+    # 4. Paquetes bloqueados
+    for item in plan["invalidos"]:
+        tareas.append({
+            "archivo": item["archivo"],
+            "accion": "manual_review",
+            "estado": "blocked",
+            "motivo": item["error"],
+        })
+
+    # 5. Inspeccionar paquetes incompletos
+    if plan["incompletos"]:
+
+        inspeccion = inspect_incomplete_watchmode_bundles(
+            region=region,
+            plan=plan,
+        )
+
+    else:
+
+        inspeccion = {
+            "region": plan["region"],
+            "recuperables": [],
+            "conflictos": [],
+            "errores": [],
+        }
+
+    resumen_inspeccion = {
+        "recuperables": len(inspeccion["recuperables"]),
+        "conflictos": len(inspeccion["conflictos"]),
+        "errores": len(inspeccion["errores"]),
+    }
+    
+    
+    # Clasificar los paquetes incompletos
+    recuperables = {
+        item["archivo"]
+        for item in inspeccion["recuperables"]
+    }
+
+    conflictos = {
+        item["archivo"]
+        for item in inspeccion["conflictos"]
+    }
+
+    errores = {
+        item["archivo"]
+        for item in inspeccion["errores"]
+    }
+
+    for tarea in tareas:
+
+        if tarea["accion"] != "inspect_incomplete":
+            continue
+
+        nombre = tarea["archivo"]
+
+        if nombre in conflictos:
+            tarea["accion"] = "manual_review"
+            tarea["estado"] = "conflict"
+
+        elif nombre in errores:
+            tarea["accion"] = "retry_inspection"
+            tarea["estado"] = "error"
+
+        elif nombre in recuperables:
+            tarea["accion"] = "recover_missing"
+            tarea["estado"] = "recoverable"
+
+        else:
+            tarea["accion"] = "manual_review"
+            tarea["estado"] = "unknown"
+
+    
+    # 6. Auditar los paquetes completos
+    if plan["existentes"]:
+
+        auditoria = audit_complete_watchmode_bundles(
+            region=region,
+            plan=plan,
+        )
+
+    else:
+
+        auditoria = {
+            "region": plan["region"],
+            "verificados": [],
+            "conflictos": [],
+            "errores": [],
+        }
+
+    resumen_auditoria = {
+        "verificados": len(auditoria["verificados"]),
+        "conflictos": len(auditoria["conflictos"]),
+        "errores": len(auditoria["errores"]),
+    }
+
+    verificados = {
+        item["archivo"]
+        for item in auditoria["verificados"]
+    }
+
+    conflictos_completos = {
+        item["archivo"]
+        for item in auditoria["conflictos"]
+    }
+
+    errores_completos = {
+        item["archivo"]
+        for item in auditoria["errores"]
+    }
+
+    # 8. Clasificar individualmente
+    for tarea in tareas:
+
+        if tarea["accion"] != "audit_complete":
+            continue
+
+        nombre = tarea["archivo"]
+
+        if nombre in conflictos_completos:
+            tarea["accion"] = "manual_review"
+            tarea["estado"] = "conflict"
+
+        elif nombre in errores_completos:
+            tarea["accion"] = "retry_audit"
+            tarea["estado"] = "error"
+
+        elif nombre in verificados:
+            tarea["accion"] = "none"
+            tarea["estado"] = "verified"
+
+        else:
+            tarea["accion"] = "manual_review"
+            tarea["estado"] = "unknown"
+
+    
+    # 8. Comparar versiones de paquetes verificados
+    if auditoria["verificados"]:
+
+        comparacion = compare_watchmode_versions(
+            region=region,
+            plan=plan,
+            auditoria=auditoria,
+        )
+
+    else:
+        comparacion = {
+            "region": plan["region"],
+            "iguales": [],
+            "diferentes": [],
+            "errores": [],
+        }
+
+    iguales = set(comparacion["iguales"])
+
+    diferentes = {
+        item["archivo"]: item
+        for item in comparacion["diferentes"]
+    }
+
+    errores_comparacion = {
+        item["archivo"]
+        for item in comparacion["errores"]
+    }
+
+    for tarea in tareas:
+
+        # Solo comparar paquetes que aprobaron
+        # previamente la auditoría remota
+        if tarea["estado"] != "verified":
+            continue
+
+        nombre = tarea["archivo"]
+
+        if nombre in errores_comparacion:
+            tarea["accion"] = "manual_review"
+            tarea["estado"] = "conflict"
+
+        elif nombre in iguales:
+            tarea["accion"] = "none"
+            tarea["estado"] = "up_to_date"
+
+
+        elif nombre in diferentes:
+
+            diferencia = diferentes[nombre]
+
+            # Compatibilidad con resultados anteriores
+            orden = diferencia.get("orden_temporal")
+
+            if orden is None:
+                orden = (
+                    "local_newer"
+                    if diferencia.get("local_mas_reciente")
+                    else "remote_newer"
+                )
+
+
+            if orden == "local_newer":
+                tarea["accion"] = "prepare_update"
+                tarea["estado"] = "update_candidate"
+
+                # Conservar la identidad de la versión
+                # remota evaluada durante la comparación.
+                tarea["expected_remote_sha256"] = (
+                    diferencia.get("hash_remoto")
+                )
+
+
+            elif orden == "remote_newer":
+                tarea["accion"] = "none"
+                tarea["estado"] = "remote_newer"
+
+            else:
+                tarea["accion"] = "manual_review"
+                tarea["estado"] = "conflict"
+                tarea["motivo"] = orden
+
+
+    resumen_comparacion = {
+        "iguales": len(comparacion["iguales"]),
+        "diferentes": len(comparacion["diferentes"]),
+        "errores": len(comparacion["errores"]),
+    }
+
+    # 9. Resultado consolidado
+    return {
+        "estado": "success",
+        "modo": "dry_run",
+        "region": plan["region"],
+
+        "resumen": {
+            "nuevos": len(plan["pendientes"]),
+            "incompletos": len(plan["incompletos"]),
+            "completos_sin_auditar": len(plan["existentes"]),
+            "bloqueados": len(plan["invalidos"]),
+        },
+
+        "inspeccion_incompletos": resumen_inspeccion,
+
+        "auditoria_completos": resumen_auditoria,
+        "comparacion_versiones": resumen_comparacion,
+        "tareas": tareas,
+    }
+
+
+def plan_watchmode_updates(
+    region: str = "PE",
+    coordination: dict | None = None,
+) -> dict:
+    """
+    Determina qué paquetes pueden avanzar
+    hacia el respaldo histórico.
+
+    No realiza subidas, copias ni eliminaciones.
+    No consulta la API de Watchmode.
+    """
+
+    region = region.upper()
+
+    if coordination is None:
+        coordination = coordinate_watchmode_sync(
+            region=region
+        )
+
+    if coordination.get("region") != region:
+        raise ValueError(
+            "La región del coordinador no coincide"
+        )
+
+    autorizados = []
+    bloqueados = []
+    sin_cambios = []
+
+    for tarea in coordination["tareas"]:
+
+        archivo = tarea["archivo"]
+        estado = tarea["estado"]
+
+
+        if estado == "update_candidate":
+
+            hash_remoto = tarea.get(
+                "expected_remote_sha256"
+            )
+
+            # Un candidato sin hash remoto válido
+            # no puede avanzar al respaldo.
+            if (
+                not isinstance(hash_remoto, str)
+                or re.fullmatch(
+                    r"[0-9a-fA-F]{64}",
+                    hash_remoto,
+                ) is None
+            ):
+                bloqueados.append({
+                    "archivo": archivo,
+                    "motivo": "missing_remote_sha256",
+                })
+                continue
+
+            autorizados.append({
+                "archivo": archivo,
+                "accion": "backup_required",
+                "estado": "pending_backup",
+                "expected_remote_sha256": (
+                    hash_remoto.lower()
+                ),
+            })
+
+
+        elif estado in ("up_to_date", "remote_newer"):
+            sin_cambios.append({
+                "archivo": archivo,
+                "motivo": estado,
+            })
+
+        else:
+            bloqueados.append({
+                "archivo": archivo,
+                "motivo": estado,
+            })
+
+    return {
+        "estado": "success",
+        "modo": "dry_run",
+        "region": region,
+        "autorizados": autorizados,
+        "bloqueados": bloqueados,
+        "sin_cambios": sin_cambios,
+    }
+
+
+def execute_watchmode_backup_plan(
+    update_plan: dict,
+    region: str = "PE",
+    dry_run: bool = True,
+) -> dict:
+    """
+    Ejecuta respaldos históricos de candidatos autorizados.
+
+    Por defecto funciona en modo simulación.
+    No publica nuevas versiones.
+    """
+
+    region = region.upper()
+
+    if update_plan.get("region") != region:
+        raise ValueError(
+            "La región del plan no coincide"
+        )
+
+    resultados = []
+    exitosos = 0
+    errores = 0
+
+    for candidato in update_plan.get("autorizados", []):
+
+        archivo = candidato["archivo"]
+        hash_esperado = candidato.get(
+            "expected_remote_sha256"
+        )
+
+        
+        # Validar autorización para el respaldo.
+        if (
+            candidato.get("estado") != "pending_backup"
+            or candidato.get("accion") != "backup_required"
+        ):
+            resultados.append({
+                "archivo": archivo,
+                "estado": "blocked",
+                "motivo": "invalid_backup_authorization",
+            })
+            errores += 1
+            continue
+
+        
+        # Validar identidad de la versión remota.
+        if (
+            not isinstance(hash_esperado, str)
+            or re.fullmatch(
+                r"[0-9a-fA-F]{64}",
+                hash_esperado,
+            ) is None
+        ):
+            resultados.append({
+                "archivo": archivo,
+                "estado": "blocked",
+                "motivo": "invalid_remote_sha256",
+            })
+            errores += 1
+            continue
+        
+        
+        # Validar el nombre también en modo simulación.
+        coincidencia = re.fullmatch(
+            r"movie_([1-9]\d*)_sources\.json",
+            archivo,
+        ) if isinstance(archivo, str) else None
+
+        if coincidencia is None:
+            resultados.append({
+                "archivo": archivo,
+                "estado": "blocked",
+                "motivo": "invalid_filename",
+            })
+            errores += 1
+            continue
+
+        tmdb_id = int(coincidencia.group(1))
+
+        
+        # El modo predeterminado no realiza escrituras.
+        if dry_run:
+            resultados.append({
+                "archivo": archivo,
+                "estado": "pending_backup",
+                "expected_remote_sha256": hash_esperado,
+            })
+            continue
+
+        try:
+            respaldo = backup_watchmode_remote_version(
+                tmdb_id=tmdb_id,
+                region=region,
+                expected_sha256=hash_esperado,
+            )
+
+            resultados.append({
+                "archivo": archivo,
+                "estado": "backup_completed",
+                "respaldo": respaldo,
+            })
+            exitosos += 1
+
+        except Exception as exc:
+            resultados.append({
+                "archivo": archivo,
+                "estado": "backup_failed",
+                "motivo": str(exc),
+            })
+            errores += 1
+
+    return {
+        "region": region,
+        "modo": "dry_run" if dry_run else "execute",
+        "estado": "partial" if errores else "success",
+        "exitosos": exitosos,
+        "errores": errores,
+        "resultados": resultados,
+    }
+
+
+def verify_watchmode_remote_unchanged(
+    tmdb_id: int,
+    expected_sha256: str,
+    region: str = "PE",
+) -> dict:
+    """
+    Comprueba que la versión remota vigente
+    no haya cambiado desde su planificación.
+
+    No modifica archivos ni consulta Watchmode.
+    """
+
+    if not isinstance(expected_sha256, str):
+        raise TypeError("SHA-256 debe ser texto")
+
+    if not re.fullmatch(
+        r"[0-9a-fA-F]{64}",
+        expected_sha256,
+    ):
+        raise ValueError("SHA-256 inválido")
+
+    ruta_json = build_watchmode_movie_path(
+        tmdb_id=tmdb_id,
+        region=region,
+    )
+
+    ruta_metadata = (
+        ruta_json.removesuffix(".json")
+        + "_metadata.json"
+    )
+
+    storage = get_supabase_client().storage.from_("Bronze")
+
+    contenido_json = storage.download(ruta_json)
+    contenido_metadata = storage.download(ruta_metadata)
+
+    datos_metadata = json.loads(contenido_metadata)
+
+    hash_actual = hashlib.sha256(
+        contenido_json
+    ).hexdigest()
+
+    if not isinstance(datos_metadata, dict):
+        return {
+            "unchanged": False,
+            "reason": "invalid_metadata",
+        }
+
+    if (
+        datos_metadata.get("tmdb_id") != tmdb_id
+        or datos_metadata.get("region") != region.upper()
+        or datos_metadata.get("region_verified") is not True
+        or datos_metadata.get("sha256") != hash_actual
+    ):
+        return {
+            "unchanged": False,
+            "reason": "metadata_integrity_error",
+        }
+
+    if hash_actual != expected_sha256.lower():
+        return {
+            "unchanged": False,
+            "reason": "remote_changed",
+        }
+
+    return {
+        "unchanged": True,
+        "reason": None,
+        "sha256": hash_actual,
+    }
 
 
 if __name__ == "__main__":

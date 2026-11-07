@@ -29,6 +29,58 @@ ARCHIVOS_ESPERADOS = [
 
 class MovieLensExtractionTests(unittest.TestCase):
 
+    
+    def test_resultado_estructurado_movielens(self):
+
+        validacion_simulada = {
+            "movies.csv": {
+                "existe": True,
+                "csv_valido": True,
+                "filas": 10,
+                "columnas": 3,
+                "tamano_mb": 0.01,
+            }
+        }
+
+        with (
+            patch(
+                "src.ingestion.movielens.download_movielens",
+                return_value=self.zip_path,
+            ),
+            patch(
+                "src.ingestion.movielens.extract_movielens",
+                return_value=self.dataset,
+            ),
+            patch(
+                "src.ingestion.movielens.validate_movielens",
+                return_value=validacion_simulada,
+            ),
+            patch(
+                "src.ingestion.movielens.save_metadata",
+                return_value=self.base / "_metadata.json",
+            ),
+            patch(
+                "src.ingestion.movielens.upload_movielens_to_supabase",
+                return_value={"metadata": "ok"},
+            ),
+        ):
+
+            resultado = run_movielens_ingestion()
+
+        self.assertEqual(resultado["estado"], "success")
+        self.assertEqual(resultado["fuente"], "MovieLens")
+
+        self.assertEqual(
+            resultado["validacion"],
+            validacion_simulada,
+        )
+
+        self.assertEqual(
+            resultado["supabase"],
+            {"metadata": "ok"},
+        )
+
+    
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

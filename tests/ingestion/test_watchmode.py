@@ -33,11 +33,849 @@ from src.ingestion.watchmode import (
     compare_watchmode_versions,
     backup_watchmode_remote_version,
     WatchmodeBackupError,
+    verify_uploaded_watchmode_bundle,
     inspect_watchmode_backup,
+    coordinate_watchmode_sync,
+    plan_watchmode_updates,
+    verify_watchmode_remote_unchanged,
+    execute_watchmode_backup_plan,
 )
 
 
 class WatchmodeTests(unittest.TestCase):
+    
+    
+    def test_respaldo_bloquea_autorizacion_invalida(self):
+
+        plan = {
+            "region": "PE",
+            "autorizados": [
+                {
+                    "archivo": "movie_550_sources.json",
+                    "estado": "conflict",
+                    "accion": "manual_review",
+                    "expected_remote_sha256": "a" * 64,
+                }
+            ],
+        }
+
+        with patch(
+            "src.ingestion.watchmode."
+            "backup_watchmode_remote_version"
+        ) as mock_backup:
+
+            resultado = execute_watchmode_backup_plan(
+                update_plan=plan,
+                region="PE",
+                dry_run=True,
+            )
+
+        self.assertEqual(
+            resultado["estado"],
+            "partial"
+        )
+
+        self.assertEqual(
+            resultado["errores"],
+            1
+        )
+
+        self.assertEqual(
+            resultado["resultados"][0]["estado"],
+            "blocked"
+        )
+
+        self.assertEqual(
+            resultado["resultados"][0]["motivo"],
+            "invalid_backup_authorization"
+        )
+
+        mock_backup.assert_not_called()
+
+    
+    def test_ejecutor_transmite_hash_al_respaldo(self):
+
+        hash_remoto = "b" * 64
+
+        plan = {
+            "region": "PE",
+            "autorizados": [
+                {
+                    "archivo": "movie_550_sources.json",
+                    "estado": "pending_backup",
+                    "accion": "backup_required",
+                    "expected_remote_sha256": hash_remoto,
+                }
+            ],
+        }
+
+        respaldo_simulado = {
+            "estado": "success",
+            "tmdb_id": 550,
+        }
+
+        with patch(
+            "src.ingestion.watchmode."
+            "backup_watchmode_remote_version",
+            return_value=respaldo_simulado,
+        ) as mock_backup:
+
+            resultado = execute_watchmode_backup_plan(
+                update_plan=plan,
+                region="PE",
+                dry_run=False,
+            )
+
+        mock_backup.assert_called_once_with(
+            tmdb_id=550,
+            region="PE",
+            expected_sha256=hash_remoto,
+        )
+
+        self.assertEqual(
+            resultado["modo"],
+            "execute"
+        )
+
+        self.assertEqual(
+            resultado["exitosos"],
+            1
+        )
+
+        self.assertEqual(
+            resultado["errores"],
+            0
+        )
+
+        self.assertEqual(
+            resultado["resultados"][0]["estado"],
+            "backup_completed"
+        )
+
+        self.assertEqual(
+            resultado["resultados"][0]["respaldo"],
+            respaldo_simulado
+        )
+
+    
+    def test_respaldo_dry_run_bloquea_nombre_invalido(self):
+
+        plan = {
+            "region": "PE",
+            "autorizados": [
+                {
+                    "archivo": "../movie_550_sources.json",
+                    "estado": "pending_backup",
+                    "accion": "backup_required",
+                    "expected_remote_sha256": "a" * 64,
+                }
+            ],
+        }
+
+        with patch(
+            "src.ingestion.watchmode."
+            "backup_watchmode_remote_version"
+        ) as mock_backup:
+
+            resultado = execute_watchmode_backup_plan(
+                update_plan=plan,
+                region="PE",
+                dry_run=True,
+            )
+
+        self.assertEqual(
+            resultado["modo"],
+            "dry_run"
+        )
+
+        self.assertEqual(
+            resultado["estado"],
+            "partial"
+        )
+
+        self.assertEqual(
+            resultado["resultados"][0]["estado"],
+            "blocked"
+        )
+
+        self.assertEqual(
+            resultado["resultados"][0]["motivo"],
+            "invalid_filename"
+        )
+
+        self.assertEqual(
+            resultado["errores"],
+            1
+        )
+
+        mock_backup.assert_not_called()
+
+    
+    def test_plan_respaldo_dry_run_no_escribe(self):
+
+        plan = {
+            "region": "PE",
+            "autorizados": [
+                {
+                    "archivo": "movie_550_sources.json",
+                    "estado": "pending_backup",
+                    "accion": "backup_required",
+                    "expected_remote_sha256": "a" * 64,
+                }
+            ],
+        }
+
+        with patch(
+            "src.ingestion.watchmode."
+            "backup_watchmode_remote_version"
+        ) as mock_backup:
+
+            resultado = execute_watchmode_backup_plan(
+                update_plan=plan,
+                region="PE",
+            )
+
+        self.assertEqual(
+            resultado["modo"],
+            "dry_run"
+        )
+
+        self.assertEqual(
+            resultado["estado"],
+            "success"
+        )
+
+        self.assertEqual(
+            resultado["resultados"][0]["estado"],
+            "pending_backup"
+        )
+
+        mock_backup.assert_not_called()
+
+    
+    def test_bloquear_respaldo_version_modificada(self):
+
+        hash_esperado = "a" * 64
+
+        with (
+            patch(
+                "src.ingestion.watchmode."
+                "verify_watchmode_remote_unchanged",
+                return_value={
+                    "unchanged": False,
+                    "reason": "remote_changed",
+                },
+            ) as mock_verificacion,
+            patch(
+                "src.ingestion.watchmode.get_supabase_client"
+            ) as mock_cliente,
+        ):
+
+            with self.assertRaises(RuntimeError) as contexto:
+
+                backup_watchmode_remote_version(
+                    tmdb_id=550,
+                    region="PE",
+                    expected_sha256=hash_esperado,
+                )
+
+        self.assertIn(
+            "Respaldo bloqueado",
+            str(contexto.exception),
+        )
+
+        mock_verificacion.assert_called_once_with(
+            tmdb_id=550,
+            expected_sha256=hash_esperado,
+            region="PE",
+        )
+
+        # No se debe acceder a Storage para copiar
+        mock_cliente.assert_not_called()
+
+    
+    def test_detectar_version_remota_modificada(self):
+
+        import hashlib
+
+        # Versión que CineMatch esperaba encontrar
+        contenido_original = b'[{"name": "Netflix"}]'
+
+        hash_esperado = hashlib.sha256(
+            contenido_original
+        ).hexdigest()
+
+        # Versión actualmente almacenada en Supabase
+        contenido_actual = b'[{"name": "Prime Video"}]'
+
+        hash_actual = hashlib.sha256(
+            contenido_actual
+        ).hexdigest()
+
+        # Los metadatos corresponden correctamente
+        # a la versión actual, pero no a la esperada
+        metadata_actual = json.dumps({
+            "tmdb_id": 550,
+            "region": "PE",
+            "region_verified": True,
+            "sha256": hash_actual,
+        }).encode("utf-8")
+
+        cliente = MagicMock()
+        storage = cliente.storage.from_.return_value
+
+        storage.download.side_effect = [
+            contenido_actual,
+            metadata_actual,
+        ]
+
+        with patch(
+            "src.ingestion.watchmode.get_supabase_client",
+            return_value=cliente,
+        ):
+            resultado = verify_watchmode_remote_unchanged(
+                tmdb_id=550,
+                expected_sha256=hash_esperado,
+                region="PE",
+            )
+
+        self.assertFalse(
+            resultado["unchanged"]
+        )
+
+        self.assertEqual(
+            resultado["reason"],
+            "remote_changed"
+        )
+
+        self.assertEqual(
+            storage.download.call_count,
+            2
+        )
+
+    def test_verificar_version_remota_sin_cambios(self):
+
+        import hashlib
+
+        contenido_json = b'[{"name": "Netflix"}]'
+
+        hash_esperado = hashlib.sha256(
+            contenido_json
+        ).hexdigest()
+
+        metadata = json.dumps({
+            "tmdb_id": 550,
+            "region": "PE",
+            "region_verified": True,
+            "sha256": hash_esperado,
+        }).encode("utf-8")
+
+        cliente = MagicMock()
+        storage = cliente.storage.from_.return_value
+
+        storage.download.side_effect = [
+            contenido_json,
+            metadata,
+        ]
+
+        with patch(
+            "src.ingestion.watchmode.get_supabase_client",
+            return_value=cliente,
+        ):
+            resultado = verify_watchmode_remote_unchanged(
+                tmdb_id=550,
+                expected_sha256=hash_esperado,
+                region="PE",
+            )
+
+        self.assertTrue(resultado["unchanged"])
+
+        self.assertIsNone(resultado["reason"])
+
+        self.assertEqual(
+            resultado["sha256"],
+            hash_esperado,
+        )
+
+        self.assertEqual(
+            storage.download.call_count,
+            2,
+        )
+
+    
+    def test_plan_bloquea_candidato_sin_hash_remoto(self):
+
+        coordinacion = {
+            "region": "PE",
+            "tareas": [
+                {
+                    "archivo": "movie_550_sources.json",
+                    "estado": "update_candidate",
+                    "expected_remote_sha256": None,
+                }
+            ],
+        }
+
+        with (
+            patch(
+                "src.ingestion.watchmode."
+                "backup_watchmode_remote_version"
+            ) as mock_backup,
+            patch(
+                "src.ingestion.watchmode.get_supabase_client"
+            ) as mock_cliente,
+        ):
+
+            resultado = plan_watchmode_updates(
+                region="PE",
+                coordination=coordinacion,
+            )
+
+        self.assertEqual(
+            resultado["autorizados"],
+            []
+        )
+
+        self.assertEqual(
+            len(resultado["bloqueados"]),
+            1
+        )
+
+        self.assertEqual(
+            resultado["bloqueados"][0]["motivo"],
+            "missing_remote_sha256"
+        )
+
+        mock_backup.assert_not_called()
+        mock_cliente.assert_not_called()
+
+    
+    def test_coordinador_conserva_hash_remoto(self):
+
+        hash_remoto = "b" * 64
+
+        plan = {
+            "region": "PE",
+            "pendientes": [],
+            "incompletos": [],
+            "existentes": [
+                {
+                    "archivo": "movie_550_sources.json"
+                }
+            ],
+            "invalidos": [],
+        }
+
+        auditoria = {
+            "region": "PE",
+            "verificados": [
+                {
+                    "archivo": "movie_550_sources.json"
+                }
+            ],
+            "conflictos": [],
+            "errores": [],
+        }
+
+        comparacion = {
+            "region": "PE",
+            "iguales": [],
+            "diferentes": [
+                {
+                    "archivo": "movie_550_sources.json",
+                    "hash_remoto": hash_remoto,
+                    "local_mas_reciente": True,
+                    "orden_temporal": "local_newer",
+                }
+            ],
+            "errores": [],
+        }
+
+        with (
+            patch(
+                "src.ingestion.watchmode.plan_watchmode_sync",
+                return_value=plan,
+            ),
+            patch(
+                "src.ingestion.watchmode."
+                "audit_complete_watchmode_bundles",
+                return_value=auditoria,
+            ),
+            patch(
+                "src.ingestion.watchmode."
+                "compare_watchmode_versions",
+                return_value=comparacion,
+            ),
+        ):
+
+            coordinacion = coordinate_watchmode_sync(
+                region="PE"
+            )
+
+        tarea = coordinacion["tareas"][0]
+
+        self.assertEqual(
+            tarea["estado"],
+            "update_candidate"
+        )
+
+        self.assertEqual(
+            tarea["expected_remote_sha256"],
+            hash_remoto
+        )
+
+        # Comprobar que el planificador
+        # recibe y conserva el mismo hash.
+        resultado = plan_watchmode_updates(
+            region="PE",
+            coordination=coordinacion,
+        )
+
+        self.assertEqual(
+            len(resultado["autorizados"]),
+            1
+        )
+
+        self.assertEqual(
+            resultado["autorizados"][0][
+                "expected_remote_sha256"
+            ],
+            hash_remoto
+        )
+
+        self.assertEqual(
+            resultado["autorizados"][0]["accion"],
+            "backup_required"
+        )
+
+    def test_plan_actualizaciones_seguras(self):
+
+        coordinacion = {
+            "region": "PE",
+            "tareas": [
+                {
+                    "archivo": "movie_100_sources.json",
+                    "estado": "update_candidate",
+                    "expected_remote_sha256": "a" * 64,
+                },
+                {
+                    "archivo": "movie_200_sources.json",
+                    "estado": "up_to_date",
+                },
+                {
+                    "archivo": "movie_300_sources.json",
+                    "estado": "remote_newer",
+                },
+                {
+                    "archivo": "movie_400_sources.json",
+                    "estado": "conflict",
+                },
+                {
+                    "archivo": "movie_500_sources.json",
+                    "estado": "recoverable",
+                },
+            ],
+        }
+
+        with (
+            patch(
+                "src.ingestion.watchmode.coordinate_watchmode_sync"
+            ) as mock_coord,
+            patch(
+                "src.ingestion.watchmode."
+                "backup_watchmode_remote_version"
+            ) as mock_backup,
+            patch(
+                "src.ingestion.watchmode.upload_file_to_storage"
+            ) as mock_upload,
+        ):
+
+            resultado = plan_watchmode_updates(
+                region="PE",
+                coordination=coordinacion,
+            )
+
+        self.assertEqual(
+            len(resultado["autorizados"]), 1
+        )
+
+        self.assertEqual(
+            resultado["autorizados"][0]["archivo"],
+            "movie_100_sources.json"
+        )
+
+        self.assertEqual(
+            resultado["autorizados"][0]["accion"],
+            "backup_required"
+        )
+
+        self.assertEqual(
+            len(resultado["sin_cambios"]), 2
+        )
+
+        self.assertEqual(
+            len(resultado["bloqueados"]), 2
+        )
+
+        self.assertEqual(
+            resultado["modo"],
+            "dry_run"
+        )
+
+        mock_coord.assert_not_called()
+        mock_backup.assert_not_called()
+        mock_upload.assert_not_called()
+
+    
+    def test_coordinador_inspecciona_incompletos(self):
+
+        plan = {
+            "region": "PE",
+            "pendientes": [],
+            "incompletos": [
+                {"archivo": "movie_550_sources.json"}
+            ],
+            "existentes": [],
+            "invalidos": [],
+        }
+
+        inspeccion = {
+            "region": "PE",
+            "recuperables": [
+                {
+                    "archivo": "movie_550_sources.json",
+                    "tipo": "metadata_missing",
+                }
+            ],
+            "conflictos": [],
+            "errores": [],
+        }
+
+        with (
+            patch(
+                "src.ingestion.watchmode.plan_watchmode_sync",
+                return_value=plan,
+            ),
+            patch(
+                "src.ingestion.watchmode."
+                "inspect_incomplete_watchmode_bundles",
+                return_value=inspeccion,
+            ) as mock_inspeccion,
+            patch(
+                "src.ingestion.watchmode.upload_file_to_storage"
+            ) as mock_upload,
+        ):
+
+            resultado = coordinate_watchmode_sync(
+                region="PE"
+            )
+
+        mock_inspeccion.assert_called_once_with(
+            region="PE",
+            plan=plan,
+        )
+
+        mock_upload.assert_not_called()
+
+        self.assertEqual(
+            resultado["inspeccion_incompletos"],
+            {
+                "recuperables": 1,
+                "conflictos": 0,
+                "errores": 0,
+            },
+        )
+
+        self.assertEqual(
+            resultado["modo"], "dry_run"
+        )
+
+    
+    def test_inspeccion_reutiliza_plan(self):
+
+        plan = {
+            "region": "PE",
+            "incompletos": [],
+        }
+
+        with (
+            patch(
+                "src.ingestion.watchmode.plan_watchmode_sync"
+            ) as mock_plan,
+            patch(
+                "src.ingestion.watchmode.get_supabase_client"
+            ) as mock_cliente,
+        ):
+            resultado = inspect_incomplete_watchmode_bundles(
+                region="PE",
+                plan=plan,
+            )
+
+        mock_plan.assert_not_called()
+        mock_cliente.assert_not_called()
+
+        self.assertEqual(
+            resultado["recuperables"], []
+        )
+
+        self.assertEqual(
+            resultado["conflictos"], []
+        )
+
+        self.assertEqual(
+            resultado["errores"], []
+        )
+
+    
+    def test_verificar_paquete_subido_watchmode(self):
+
+        with TemporaryDirectory() as temporal:
+
+            directorio = Path(temporal)
+
+            json_local = directorio / "movie_550_sources.json"
+            metadata_local = directorio / "movie_550_sources_metadata.json"
+
+            contenido_json = b'[{"name": "Netflix"}]'
+            contenido_metadata = b'{"region": "PE"}'
+
+            json_local.write_bytes(contenido_json)
+            metadata_local.write_bytes(contenido_metadata)
+
+            paquete = {
+                "json_local": json_local,
+                "metadata_local": metadata_local,
+                "json_remoto": (
+                    "watchmode/regions/PE/"
+                    "movie_550_sources.json"
+                ),
+                "metadata_remoto": (
+                    "watchmode/regions/PE/"
+                    "movie_550_sources_metadata.json"
+                ),
+            }
+
+            cliente = MagicMock()
+            storage = cliente.storage.from_.return_value
+
+            storage.download.side_effect = [
+                contenido_json,
+                contenido_metadata,
+            ]
+
+            with patch(
+                "src.ingestion.watchmode.get_supabase_client",
+                return_value=cliente,
+            ):
+                resultado = verify_uploaded_watchmode_bundle(
+                    paquete
+                )
+
+        self.assertTrue(resultado["valid"])
+        self.assertIsNone(resultado["error"])
+        self.assertEqual(storage.download.call_count, 2)
+
+    
+    def test_coordinador_clasifica_incompletos(self):
+
+        plan = {
+            "region": "PE",
+            "pendientes": [],
+            "incompletos": [
+                {"archivo": "movie_100_sources.json"},
+                {"archivo": "movie_200_sources.json"},
+                {"archivo": "movie_300_sources.json"},
+            ],
+            "existentes": [],
+            "invalidos": [],
+        }
+
+        inspeccion = {
+            "region": "PE",
+            "recuperables": [
+                {"archivo": "movie_100_sources.json"}
+            ],
+            "conflictos": [
+                {"archivo": "movie_200_sources.json"}
+            ],
+            "errores": [
+                {"archivo": "movie_300_sources.json"}
+            ],
+        }
+
+        with (
+            patch(
+                "src.ingestion.watchmode.plan_watchmode_sync",
+                return_value=plan,
+            ),
+            patch(
+                "src.ingestion.watchmode.inspect_incomplete_watchmode_bundles",
+                return_value=inspeccion,
+            ),
+        ):
+            resultado = coordinate_watchmode_sync(
+                region="PE"
+            )
+
+        estados = {
+            tarea["archivo"]: tarea["estado"]
+            for tarea in resultado["tareas"]
+        }
+
+        self.assertEqual(
+            estados["movie_100_sources.json"],
+            "recoverable"
+        )
+
+        self.assertEqual(
+            estados["movie_200_sources.json"],
+            "conflict"
+        )
+
+        self.assertEqual(
+            estados["movie_300_sources.json"],
+            "error"
+        )
+
+    
+    def test_sincronizacion_sin_paquetes_pendientes(self):
+
+        plan_simulado = {
+            "region": "PE",
+            "preparados": [],
+            "existentes": [],
+            "errores": [],
+        }
+
+        with (
+            patch(
+                "src.ingestion.watchmode.prepare_watchmode_sync_bundles",
+                return_value=plan_simulado,
+            ),
+            patch(
+                "src.ingestion.watchmode.upload_file_to_storage"
+            ) as mock_upload,
+        ):
+            resultado = sync_watchmode_bundles(
+                region="PE"
+            )
+
+        self.assertEqual(
+            resultado["estado"],
+            "success"
+        )
+
+        self.assertEqual(
+            resultado["paquetes_subidos"],
+            0
+        )
+
+        self.assertEqual(
+            resultado["paquetes_fallidos"],
+            0
+        )
+
+        mock_upload.assert_not_called()
 
     
     def test_respaldo_error_conexion(self):
@@ -500,6 +1338,913 @@ class WatchmodeTests(unittest.TestCase):
         )
 
     
+    def test_comparacion_detecta_fechas_iguales(self):
+
+        import hashlib
+
+        with TemporaryDirectory() as temporal:
+            directorio = Path(temporal)
+
+            with patch(
+                "src.ingestion.watchmode.BRONZE_WATCHMODE_DIR",
+                directorio,
+            ):
+                self.crear_pelicula_vigente(550, "PE")
+
+                archivo = build_local_watchmode_path(
+                    550, "PE"
+                )
+
+                metadata_local = archivo.with_name(
+                    archivo.stem + "_metadata.json"
+                )
+
+                datos_locales = json.loads(
+                    metadata_local.read_text(
+                        encoding="utf-8"
+                    )
+                )
+
+                fecha_igual = datos_locales["retrieved_at"]
+
+                # Contenido remoto distinto
+                contenido_remoto = (
+                    b'[{"name": "Prime Video"}]'
+                )
+
+                hash_remoto = hashlib.sha256(
+                    contenido_remoto
+                ).hexdigest()
+
+                metadata_remota = json.dumps({
+                    "tmdb_id": 550,
+                    "region": "PE",
+                    "region_verified": True,
+                    "retrieved_at": fecha_igual,
+                    "sha256": hash_remoto,
+                }).encode("utf-8")
+
+                plan = {
+                    "region": "PE",
+                    "existentes": [{
+                        "archivo": archivo.name,
+                        "origen": str(archivo),
+                        "destino": (
+                            "watchmode/regions/PE/"
+                            "movie_550_sources.json"
+                        ),
+                    }],
+                }
+
+                auditoria = {
+                    "region": "PE",
+                    "verificados": [{
+                        "archivo": archivo.name,
+                        "sha256": hash_remoto,
+                    }],
+                    "conflictos": [],
+                    "errores": [],
+                }
+
+                cliente = MagicMock()
+                storage = cliente.storage.from_.return_value
+                storage.download.return_value = (
+                    metadata_remota
+                )
+
+                with patch(
+                    "src.ingestion.watchmode.get_supabase_client",
+                    return_value=cliente,
+                ):
+                    resultado = compare_watchmode_versions(
+                        region="PE",
+                        plan=plan,
+                        auditoria=auditoria,
+                    )
+
+        self.assertEqual(resultado["errores"], [])
+        self.assertEqual(len(resultado["diferentes"]), 1)
+
+        diferencia = resultado["diferentes"][0]
+
+        self.assertEqual(
+            diferencia["orden_temporal"],
+            "same_timestamp_conflict"
+        )
+
+        self.assertFalse(
+            diferencia["local_mas_reciente"]
+        )
+
+    
+    
+    def test_sync_detecta_metadata_remota_diferente(self):
+
+        with TemporaryDirectory() as temporal:
+            directorio = Path(temporal)
+
+            # Crear archivos locales
+            json_local = (
+                directorio / "movie_550_sources.json"
+            )
+
+            metadata_local = (
+                directorio / "movie_550_sources_metadata.json"
+            )
+
+            contenido_json = b'[{"name": "Netflix"}]'
+            contenido_metadata = b'{"region": "PE"}'
+
+            json_local.write_bytes(contenido_json)
+            metadata_local.write_bytes(contenido_metadata)
+
+            paquete = {
+                "json_local": json_local,
+                "metadata_local": metadata_local,
+                "json_remoto": (
+                    "watchmode/regions/PE/"
+                    "movie_550_sources.json"
+                ),
+                "metadata_remoto": (
+                    "watchmode/regions/PE/"
+                    "movie_550_sources_metadata.json"
+                ),
+            }
+
+            plan_simulado = {
+                "region": "PE",
+                "preparados": [paquete],
+                "existentes": [],
+                "errores": [],
+            }
+
+            # Simular el cliente de Supabase
+            cliente = MagicMock()
+            storage = cliente.storage.from_.return_value
+
+            # JSON remoto correcto,
+            # pero metadatos remotos diferentes
+            storage.download.side_effect = [
+                contenido_json,
+                b'{"region": "CL"}',
+            ]
+
+            with (
+                patch(
+                    "src.ingestion.watchmode."
+                    "prepare_watchmode_sync_bundles",
+                    return_value=plan_simulado,
+                ),
+                patch(
+                    "src.ingestion.watchmode."
+                    "upload_file_to_storage"
+                ) as mock_upload,
+                patch(
+                    "src.ingestion.watchmode."
+                    "get_supabase_client",
+                    return_value=cliente,
+                ),
+                patch(
+                    "src.ingestion.watchmode.audit_complete_watchmode_bundles",
+                    return_value={
+                        "region": "PE",
+                        "verificados": [],
+                        "conflictos": [],
+                        "errores": [],
+                },
+            ),
+            ):
+
+                resultado = sync_watchmode_bundles(
+                    region="PE"
+                )
+
+        # Se intentaron las dos subidas
+        self.assertEqual(
+            mock_upload.call_count,
+            2
+        )
+
+        # Se verificaron los dos objetos remotos
+        self.assertEqual(
+            storage.download.call_count,
+            2
+        )
+
+        # Ningún paquete debe considerarse exitoso
+        self.assertEqual(
+            resultado["paquetes_subidos"],
+            0
+        )
+
+        # Debe registrarse un paquete fallido
+        self.assertEqual(
+            resultado["paquetes_fallidos"],
+            1
+        )
+
+        self.assertEqual(
+            resultado["estado"],
+            "partial"
+        )
+
+        self.assertEqual(
+            len(resultado["errores"]),
+            1
+        )
+
+        self.assertIn(
+            "sha256_mismatch",
+            resultado["errores"][0]["error"]
+        )
+
+    
+    def test_coordinador_bloquea_fechas_iguales(self):
+
+        plan = {
+            "region": "PE",
+            "pendientes": [],
+            "incompletos": [],
+            "existentes": [
+                {"archivo": "movie_550_sources.json"}
+            ],
+            "invalidos": [],
+        }
+
+        auditoria = {
+            "region": "PE",
+            "verificados": [
+                {"archivo": "movie_550_sources.json"}
+            ],
+            "conflictos": [],
+            "errores": [],
+        }
+
+        comparacion = {
+            "region": "PE",
+            "iguales": [],
+            "diferentes": [
+                {
+                    "archivo": "movie_550_sources.json",
+                    "local_mas_reciente": False,
+                    "orden_temporal": "same_timestamp_conflict",
+                }
+            ],
+            "errores": [],
+        }
+
+        with (
+            patch(
+                "src.ingestion.watchmode.plan_watchmode_sync",
+                return_value=plan,
+            ),
+            patch(
+                "src.ingestion.watchmode.audit_complete_watchmode_bundles",
+                return_value=auditoria,
+            ),
+            patch(
+                "src.ingestion.watchmode.compare_watchmode_versions",
+                return_value=comparacion,
+            ),
+            patch(
+                "src.ingestion.watchmode.upload_file_to_storage"
+            ) as mock_upload,
+        ):
+
+            resultado = coordinate_watchmode_sync(
+                region="PE"
+            )
+
+        tarea = resultado["tareas"][0]
+
+        self.assertEqual(
+            tarea["estado"],
+            "conflict"
+        )
+
+        self.assertEqual(
+            tarea["accion"],
+            "manual_review"
+        )
+
+        self.assertEqual(
+            tarea["motivo"],
+            "same_timestamp_conflict"
+        )
+
+        mock_upload.assert_not_called()
+
+    
+    def test_coordinador_audita_paquetes_completos(self):
+
+        plan = {
+            "region": "PE",
+            "pendientes": [],
+            "incompletos": [],
+            "existentes": [
+                {"archivo": "movie_100_sources.json"},
+                {"archivo": "movie_200_sources.json"},
+                {"archivo": "movie_300_sources.json"},
+            ],
+            "invalidos": [],
+        }
+
+        auditoria = {
+            "region": "PE",
+            "verificados": [
+                {"archivo": "movie_100_sources.json"}
+            ],
+            "conflictos": [
+                {"archivo": "movie_200_sources.json"}
+            ],
+            "errores": [
+                {"archivo": "movie_300_sources.json"}
+            ],
+        }
+
+        with (
+            patch(
+                "src.ingestion.watchmode.plan_watchmode_sync",
+                return_value=plan,
+            ),
+            patch(
+                "src.ingestion.watchmode.compare_watchmode_versions",
+                return_value={
+                    "region": "PE",
+                    "iguales": ["movie_100_sources.json"],
+                    "diferentes": [],
+                    "errores": [],
+                },
+            ),
+            patch(
+                "src.ingestion.watchmode.audit_complete_watchmode_bundles",
+                return_value=auditoria,
+            ) as mock_auditoria,
+            patch(
+                "src.ingestion.watchmode.upload_file_to_storage"
+            ) as mock_upload,
+        ):
+
+            resultado = coordinate_watchmode_sync(
+                region="PE"
+            )
+
+        mock_auditoria.assert_called_once_with(
+            region="PE",
+            plan=plan,
+        )
+
+        mock_upload.assert_not_called()
+
+        estados = {
+            tarea["archivo"]: tarea["estado"]
+            for tarea in resultado["tareas"]
+        }
+
+        self.assertEqual(
+            estados["movie_100_sources.json"],
+            "up_to_date"
+        )
+
+        self.assertEqual(
+            estados["movie_200_sources.json"],
+            "conflict"
+        )
+
+        self.assertEqual(
+            estados["movie_300_sources.json"],
+            "error"
+        )
+
+        self.assertEqual(
+            resultado["auditoria_completos"],
+            {
+                "verificados": 1,
+                "conflictos": 1,
+                "errores": 1,
+            }
+        )
+
+    
+    def test_auditoria_completos_reutiliza_plan(self):
+
+        plan = {
+            "region": "PE",
+            "existentes": [],
+        }
+
+        with (
+            patch(
+                "src.ingestion.watchmode.plan_watchmode_sync"
+            ) as mock_plan,
+            patch(
+                "src.ingestion.watchmode.get_supabase_client"
+            ) as mock_cliente,
+        ):
+
+            resultado = audit_complete_watchmode_bundles(
+                region="PE",
+                plan=plan,
+            )
+
+        # No debe calcular nuevamente el inventario
+        mock_plan.assert_not_called()
+
+        # No hay paquetes completos que descargar
+        mock_cliente.assert_not_called()
+
+        self.assertEqual(
+            resultado["region"],
+            "PE",
+        )
+
+        self.assertEqual(
+            resultado["verificados"],
+            [],
+        )
+
+        self.assertEqual(
+            resultado["conflictos"],
+            [],
+        )
+
+        self.assertEqual(
+            resultado["errores"],
+            [],
+        )
+
+    
+    def test_recuperar_json_faltante_watchmode(self):
+
+        with TemporaryDirectory() as temporal:
+            directorio = Path(temporal)
+
+            with patch(
+                "src.ingestion.watchmode.BRONZE_WATCHMODE_DIR",
+                directorio,
+            ):
+                # Crear paquete local válido y verificado
+                self.crear_pelicula_vigente(550, "PE")
+
+                archivo = build_local_watchmode_path(
+                    550, "PE"
+                )
+
+                metadata = archivo.with_name(
+                    archivo.stem + "_metadata.json"
+                )
+
+                contenido_json = archivo.read_bytes()
+                contenido_metadata = metadata.read_bytes()
+
+                # En Supabase solo existe la metadata
+                archivos_remotos = {
+                    "movie_550_sources_metadata.json"
+                }
+
+                cliente = MagicMock()
+                storage = cliente.storage.from_.return_value
+
+                # Primera descarga: metadata existente
+                # Segunda descarga: JSON después de subirlo
+                storage.download.side_effect = [
+                    contenido_metadata,
+                    contenido_json,
+                ]
+
+                with (
+                    patch(
+                        "src.ingestion.watchmode.list_storage_filenames",
+                        return_value=archivos_remotos,
+                    ),
+                    patch(
+                        "src.ingestion.watchmode.get_supabase_client",
+                        return_value=cliente,
+                    ),
+                    patch(
+                        "src.ingestion.watchmode.upload_file_to_storage"
+                    ) as mock_upload,
+                ):
+
+                    resultado = (
+                        recover_incomplete_watchmode_bundles(
+                            region="PE"
+                        )
+                    )
+
+        # Se recuperó exactamente un paquete
+        self.assertEqual(
+            resultado["recuperados"], 1
+        )
+
+        self.assertEqual(
+            resultado["fallidos"], 0
+        )
+
+        self.assertEqual(
+            resultado["conflictos"], []
+        )
+
+        self.assertEqual(
+            resultado["errores"], []
+        )
+
+        # Solo debe subirse el JSON faltante
+        mock_upload.assert_called_once()
+
+        argumentos = mock_upload.call_args.kwargs
+
+        self.assertEqual(
+            argumentos["local_path"],
+            archivo
+        )
+
+        self.assertEqual(
+            argumentos["remote_path"],
+            "watchmode/regions/PE/movie_550_sources.json"
+        )
+
+        self.assertFalse(
+            argumentos["upsert"]
+        )
+
+        # Se inspeccionó la metadata y se verificó el JSON
+        self.assertEqual(
+            storage.download.call_count, 2
+        )
+
+    
+    def test_recuperar_json_faltante_watchmode(self):
+
+        with TemporaryDirectory() as temporal:
+            directorio = Path(temporal)
+
+            with patch(
+                "src.ingestion.watchmode.BRONZE_WATCHMODE_DIR",
+                directorio,
+            ):
+                # Crear paquete local válido
+                self.crear_pelicula_vigente(550, "PE")
+
+                archivo = build_local_watchmode_path(
+                    550, "PE"
+                )
+
+                metadata = archivo.with_name(
+                    archivo.stem + "_metadata.json"
+                )
+
+                contenido_json = archivo.read_bytes()
+                contenido_metadata = metadata.read_bytes()
+
+                # Simular que solo existe metadata remota
+                archivos_remotos = {
+                    "movie_550_sources_metadata.json"
+                }
+
+                cliente = MagicMock()
+                storage = cliente.storage.from_.return_value
+
+                # Inspección de metadata y
+                # verificación posterior del JSON
+                storage.download.side_effect = [
+                    contenido_metadata,
+                    contenido_json,
+                ]
+
+                with (
+                    patch(
+                        "src.ingestion.watchmode.list_storage_filenames",
+                        return_value=archivos_remotos,
+                    ),
+                    patch(
+                        "src.ingestion.watchmode.get_supabase_client",
+                        return_value=cliente,
+                    ),
+                    patch(
+                        "src.ingestion.watchmode.upload_file_to_storage"
+                    ) as mock_upload,
+                ):
+                    resultado = (
+                        recover_incomplete_watchmode_bundles(
+                            region="PE"
+                        )
+                    )
+
+        # Debe recuperar un paquete
+        self.assertEqual(resultado["recuperados"], 1)
+        self.assertEqual(resultado["fallidos"], 0)
+        self.assertEqual(resultado["conflictos"], [])
+        self.assertEqual(resultado["errores"], [])
+
+        # Solo debe subir el JSON faltante
+        mock_upload.assert_called_once()
+
+        argumentos = mock_upload.call_args.kwargs
+
+        self.assertEqual(
+            argumentos["local_path"],
+            archivo
+        )
+
+        self.assertEqual(
+            argumentos["remote_path"],
+            "watchmode/regions/PE/movie_550_sources.json"
+        )
+
+        self.assertFalse(argumentos["upsert"])
+
+        # Una descarga para inspeccionar y otra para verificar
+        self.assertEqual(
+            storage.download.call_count,
+            2
+        )
+
+    
+    def test_comparacion_reutiliza_plan_y_auditoria(self):
+
+        plan = {
+            "region": "PE",
+            "existentes": [],
+        }
+
+        auditoria = {
+            "region": "PE",
+            "verificados": [],
+            "conflictos": [],
+            "errores": [],
+        }
+
+        with (
+            patch(
+                "src.ingestion.watchmode.plan_watchmode_sync"
+            ) as mock_plan,
+            patch(
+                "src.ingestion.watchmode.audit_complete_watchmode_bundles"
+            ) as mock_auditoria,
+            patch(
+                "src.ingestion.watchmode.get_supabase_client"
+            ) as mock_cliente,
+        ):
+
+            resultado = compare_watchmode_versions(
+                region="PE",
+                plan=plan,
+                auditoria=auditoria,
+            )
+
+        mock_plan.assert_not_called()
+        mock_auditoria.assert_not_called()
+        mock_cliente.assert_not_called()
+
+        self.assertEqual(resultado["region"], "PE")
+        self.assertEqual(resultado["iguales"], [])
+        self.assertEqual(resultado["diferentes"], [])
+        self.assertEqual(resultado["errores"], [])
+
+    
+    def test_coordinador_compara_versiones(self):
+
+        plan = {
+            "region": "PE",
+            "pendientes": [],
+            "incompletos": [],
+            "existentes": [
+                {"archivo": "movie_100_sources.json"},
+                {"archivo": "movie_200_sources.json"},
+                {"archivo": "movie_300_sources.json"},
+            ],
+            "invalidos": [],
+        }
+
+        auditoria = {
+            "region": "PE",
+            "verificados": [
+                {"archivo": "movie_100_sources.json"},
+                {"archivo": "movie_200_sources.json"},
+                {"archivo": "movie_300_sources.json"},
+            ],
+            "conflictos": [],
+            "errores": [],
+        }
+
+        comparacion = {
+            "region": "PE",
+            "iguales": [
+                "movie_100_sources.json"
+            ],
+            "diferentes": [
+                {
+                    "archivo": "movie_200_sources.json",
+                    "local_mas_reciente": True,
+                },
+                {
+                    "archivo": "movie_300_sources.json",
+                    "local_mas_reciente": False,
+                },
+            ],
+            "errores": [],
+        }
+
+        with (
+            patch(
+                "src.ingestion.watchmode.plan_watchmode_sync",
+                return_value=plan,
+            ),
+            patch(
+                "src.ingestion.watchmode.audit_complete_watchmode_bundles",
+                return_value=auditoria,
+            ),
+            patch(
+                "src.ingestion.watchmode.compare_watchmode_versions",
+                return_value=comparacion,
+            ) as mock_comparacion,
+        ):
+            resultado = coordinate_watchmode_sync(
+                region="PE"
+            )
+
+        mock_comparacion.assert_called_once_with(
+            region="PE",
+            plan=plan,
+            auditoria=auditoria,
+        )
+
+        estados = {
+            tarea["archivo"]: tarea["estado"]
+            for tarea in resultado["tareas"]
+        }
+
+        self.assertEqual(
+            estados["movie_100_sources.json"],
+            "up_to_date"
+        )
+
+        self.assertEqual(
+            estados["movie_200_sources.json"],
+            "update_candidate"
+        )
+
+        self.assertEqual(
+            estados["movie_300_sources.json"],
+            "remote_newer"
+        )
+
+        self.assertEqual(
+            resultado["comparacion_versiones"],
+            {
+                "iguales": 1,
+                "diferentes": 2,
+                "errores": 0,
+            }
+        )
+
+    
+    def test_coordinador_sincronizacion_watchmode(self):
+
+        plan_simulado = {
+            "region": "PE",
+            "pendientes": [
+                {"archivo": "movie_100_sources.json"}
+            ],
+            "incompletos": [
+                {"archivo": "movie_200_sources.json"}
+            ],
+            "existentes": [
+                {"archivo": "movie_300_sources.json"}
+            ],
+            "invalidos": [
+                {
+                    "archivo": "movie_400_sources.json",
+                    "error": "region_unverified",
+                }
+            ],
+        }
+
+
+        with (
+            patch(
+                "src.ingestion.watchmode.plan_watchmode_sync",
+                return_value=plan_simulado,
+            ) as mock_plan,
+            patch(
+                "src.ingestion.watchmode.inspect_incomplete_watchmode_bundles",
+                return_value={
+                    "region": "PE",
+                    "recuperables": [],
+                    "conflictos": [],
+                    "errores": [],
+                },
+            ) as mock_inspeccion,
+            patch(
+                "src.ingestion.watchmode.audit_complete_watchmode_bundles",
+                return_value={
+                    "region": "PE",
+                    "verificados": [],
+                    "conflictos": [],
+                    "errores": [],
+                },
+            ) as mock_auditoria,
+            patch(
+                "src.ingestion.watchmode.upload_file_to_storage"
+            ) as mock_upload,
+            patch(
+                "src.ingestion.watchmode.extract_watchmode_sources"
+            ) as mock_api,
+        ):
+            resultado = coordinate_watchmode_sync(
+                region="PE"
+            )
+
+        
+        tarea_incompleta = next(
+            tarea
+            for tarea in resultado["tareas"]
+            if tarea["archivo"] == "movie_200_sources.json"
+        )
+
+        tarea_completa = next(
+            tarea
+            for tarea in resultado["tareas"]
+            if tarea["archivo"] == "movie_300_sources.json"
+        )
+
+        self.assertEqual(
+            tarea_completa["estado"],
+            "unknown"
+        )
+
+        self.assertEqual(
+            tarea_completa["accion"],
+            "manual_review"
+        )
+
+        self.assertEqual(
+            tarea_incompleta["estado"],
+            "unknown"
+        )
+
+        self.assertEqual(
+            resultado["estado"], "success"
+        )
+
+        self.assertEqual(
+            resultado["modo"], "dry_run"
+        )
+
+        self.assertEqual(
+            resultado["resumen"],
+            {
+                "nuevos": 1,
+                "incompletos": 1,
+                "completos_sin_auditar": 1,
+                "bloqueados": 1,
+            },
+        )
+
+        self.assertEqual(
+            len(resultado["tareas"]), 4
+        )
+
+
+        self.assertEqual(
+            [
+                tarea["accion"]
+                for tarea in resultado["tareas"]
+            ],
+            [
+                "upload_new",
+                "manual_review",
+                "manual_review",
+                "manual_review",
+            ],
+        )
+        
+        self.assertEqual(
+            resultado["auditoria_completos"],
+            {
+                "verificados": 0,
+                "conflictos": 0,
+                "errores": 0,
+            },
+        )
+
+
+        mock_plan.assert_called_once_with(
+            region="PE"
+        )
+        mock_auditoria.assert_called_once_with(
+            region="PE",
+            plan=plan_simulado,
+        )
+        mock_inspeccion.assert_called_once_with(
+            region="PE",
+            plan=plan_simulado,
+        )
+        mock_upload.assert_not_called()
+        mock_api.assert_not_called()
+
+    
     def test_auditar_paquete_completo_watchmode(self):
 
         contenido_json = b'[{"name": "Netflix"}]'
@@ -737,6 +2482,10 @@ class WatchmodeTests(unittest.TestCase):
                     patch(
                         "src.ingestion.watchmode.upload_file_to_storage"
                     ) as mock_upload,
+                    patch(
+                        "src.ingestion.watchmode.verify_uploaded_watchmode_bundle",
+                        return_value={"valid": True, "error": None},
+                    ),
                 ):
                     resultado = sync_watchmode_bundles(
                         region="PE"
@@ -2461,6 +4210,93 @@ class WatchmodeTests(unittest.TestCase):
     
                 mock_list.assert_called_once()
     
+    
+    def test_ingesta_no_utiliza_subida_antigua(self):
+
+        extraccion = {
+            "solicitados": 1,
+            "exitosos": 1,
+            "existentes": 0,
+            "sin_disponibilidad": 0,
+            "errores": [],
+            "region": "PE",
+        }
+
+        validacion = {
+            "region": "PE",
+            "archivos_totales": 1,
+            "archivos_validos": 1,
+            "archivos_vacios": 0,
+            "archivos_invalidos": [],
+        }
+
+        plan = {
+            "existentes": 0,
+            "pendientes_totales": 1,
+            "ids_seleccionados": [550],
+            "consultas_planificadas": 1,
+            "creditos_restantes": 500,
+            "creditos_disponibles": 200,
+        }
+
+        with (
+            patch(
+                "src.ingestion.watchmode.load_watchmode_api_key",
+                return_value="api_simulada",
+            ),
+            patch(
+                "src.ingestion.watchmode.get_watchmode_quota",
+                return_value={
+                    "quota": 1000,
+                    "quotaUsed": 500,
+                },
+            ),
+            patch(
+                "src.ingestion.watchmode.load_tmdb_ids_from_movielens",
+                return_value=[550],
+            ),
+            patch(
+                "src.ingestion.watchmode.plan_watchmode_requests",
+                return_value=plan,
+            ),
+            patch(
+                "src.ingestion.watchmode.extract_watchmode_movies",
+                return_value=extraccion,
+            ),
+            patch(
+                "src.ingestion.watchmode.validate_watchmode",
+                return_value=validacion,
+            ),
+            patch(
+                "src.ingestion.watchmode.save_watchmode_metadata",
+                return_value=Path("metadata_simulada.json"),
+            ),
+            patch(
+                "src.ingestion.watchmode.upload_watchmode_to_supabase"
+            ) as mock_subida_antigua,
+        ):
+
+            resultado = run_watchmode_ingestion(
+                limit=1,
+                region="PE",
+            )
+
+        self.assertEqual(
+            resultado["estado"],
+            "success",
+        )
+
+        self.assertEqual(
+            resultado["fuente"],
+            "Watchmode",
+        )
+
+        self.assertEqual(
+            resultado["region"],
+            "PE",
+        )
+
+        mock_subida_antigua.assert_not_called()
 
 
 if __name__ == "__main__":
