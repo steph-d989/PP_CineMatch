@@ -13,11 +13,11 @@ from src.utils.paths import (
 
 
 ### FUNCION QUE CARGA LOS DATASETS NECESARIOS PARA INTEGRAR LAS APIS
-
-
 def load_silver_datasets(
     run_dirs: dict[str, Path] | None = None,
+    include_availability: bool = False,
 ):
+
 
     
     movielens_dir = (
@@ -53,6 +53,15 @@ def load_silver_datasets(
         ),
     }
 
+    
+    # Incluir las plataformas para validar
+    # las cantidades declaradas en Watchmode.
+    if include_availability:
+        rutas["watchmode_availability"] = (
+            watchmode_dir / "availability.parquet"
+        )
+
+    
     datasets = {}
 
     for nombre, ruta in rutas.items():
@@ -70,7 +79,6 @@ def load_silver_datasets(
 
 
 ### FUNCION QUE INTEGRA CATALOGO DE MOVIELENS CON LOS IDENTIFICADORES
-
 def integrate_movielens(
     movies: pd.DataFrame,
     links: pd.DataFrame,
@@ -85,9 +93,7 @@ def integrate_movielens(
 
     return df
 
-
 ### FUNCION QUE ENRIQUECE MOVIELENS CON METADATA TMDB
-
 def integrate_tmdb(
     movies: pd.DataFrame,
     tmdb: pd.DataFrame,
@@ -133,7 +139,6 @@ def integrate_tmdb(
 
 
 ### FUNCION QUE CREA UN TITULO CANONICO
-
 def create_canonical_fields(
     df: pd.DataFrame
 ) -> pd.DataFrame:
@@ -149,8 +154,6 @@ def create_canonical_fields(
 
 
 ### FUNCION QUE AÑADE INFORMACION SOBRE DISPONIBILIDAD CONOCIDA EN WATCHMODE
-
-
 def integrate_watchmode_status(
     movies: pd.DataFrame,
     status: pd.DataFrame,
@@ -189,7 +192,6 @@ def integrate_watchmode_status(
 
 
 ### FUNCION QUE INTEGRA EL ESTADO DE WATCHMODE
-
 def add_watchmode_check_status(
     df: pd.DataFrame,
     watchmode_ids: set
@@ -205,13 +207,89 @@ def add_watchmode_check_status(
 
     return df
 
+### FUNCION QUE COMPRUEBA QUE SOURCES_COUNT COINCIDA CON LAS FILAS REALES DE DISPONIBILIDAD DE WATCHMODE
+def validate_watchmode_source_counts(
+    availability: pd.DataFrame,
+    status: pd.DataFrame,
+) -> None:
+
+    required_availability = {"tmdb_id"}
+    required_status = {
+        "tmdb_id",
+        "sources_count",
+    }
+
+    if not required_availability.issubset(availability.columns):
+        raise ValueError(
+            "Watchmode availability no contiene tmdb_id."
+        )
+
+    if not required_status.issubset(status.columns):
+        raise ValueError(
+            "Watchmode status no contiene columnas obligatorias."
+        )
+
+    if status["tmdb_id"].isna().any():
+        raise ValueError(
+            "Watchmode status contiene tmdb_id nulos."
+        )
+
+    if status["tmdb_id"].duplicated().any():
+        raise ValueError(
+            "Watchmode status contiene tmdb_id duplicados."
+        )
+
+    conteos = availability.groupby(
+        "tmdb_id"
+    ).size()
+
+    # No debe haber plataformas de películas
+    # que no aparezcan en la tabla de estado.
+    ids_huerfanos = set(conteos.index) - set(
+        status["tmdb_id"]
+    )
+
+    if ids_huerfanos:
+        raise ValueError(
+            "Watchmode contiene plataformas sin estado."
+        )
+
+    esperados = (
+        status["tmdb_id"]
+        .map(conteos)
+        .fillna(0)
+        .astype("int64")
+    )
+
+    declarados = pd.to_numeric(
+        status["sources_count"],
+        errors="coerce",
+    )
+
+    if (
+        declarados.isna().any()
+        or (declarados != esperados).any()
+    ):
+        raise ValueError(
+            "Watchmode sources_count no coincide "
+            "con las plataformas registradas."
+        )
 
 ### FUNCION PRINCIPAL DE INTEGRACION CONSTRUYE UN CATALOGO INTEGRADO
-
 def build_integrated_movies(
     datasets: dict[str, pd.DataFrame]
 ) -> pd.DataFrame:
 
+    
+    # Validar las cantidades reales de plataformas
+    # cuando se haya cargado availability.parquet.
+    if "watchmode_availability" in datasets:
+        validate_watchmode_source_counts(
+            availability=datasets["watchmode_availability"],
+            status=datasets["watchmode_status"],
+        )
+
+    
     df = integrate_movielens(
         datasets["movies"],
         datasets["links"],
@@ -250,8 +328,6 @@ def build_integrated_movies(
 
 
 ### FUNCION QUE GUARDA UN CATALOGO INTEGRADO SILVER
-
-
 def save_integrated_movies(
     df: pd.DataFrame,
     output_dir: Path | None = None,
@@ -285,16 +361,11 @@ def save_integrated_movies(
 
     return ruta
 
-
+### FUNCION QUE VALIDA LAS CLAVES DEL CATALOGO INTEGRATED, 1 PELI APARECE SOLO 1 VEZ, CON SOLO UN MOVIE_ID
 def validate_integrated_catalog(
     df: pd.DataFrame,
 ) -> pd.DataFrame:
-    """
-    Valida las claves del catálogo Integrated.
 
-    Una película de MovieLens debe aparecer
-    una sola vez y tener un movie_id válido.
-    """
 
     if "movie_id" not in df.columns:
         raise ValueError(
@@ -310,6 +381,86 @@ def validate_integrated_catalog(
         raise ValueError(
             "Integrated contiene movie_id duplicados."
         )
+
+    # Validar que movie_id sea numérico,
+    # entero y estrictamente positivo.
+    ids = pd.to_numeric(
+        df["movie_id"],
+        errors="coerce",
+    )
+
+    if (
+        ids.isna().any()
+        or (ids <= 0).any()
+        or (ids % 1 != 0).any()
+    ):
+        raise ValueError(
+            "Integrated contiene movie_id inválidos. "
+            "Deben ser enteros positivos."
+        )
+
+
+    # Validar coherencia de la disponibilidad Watchmode.
+    columnas_watchmode = {
+        "watchmode_checked",
+        "has_availability",
+        "sources_count",
+    }
+
+    faltantes = columnas_watchmode - set(df.columns)
+
+    if faltantes:
+        raise ValueError(
+            "Integrated no contiene columnas Watchmode: "
+            + ", ".join(sorted(faltantes))
+        )
+
+    checked = df["watchmode_checked"].astype("boolean")
+    available = df["has_availability"].astype("boolean")
+    count = pd.to_numeric(
+        df["sources_count"],
+        errors="coerce",
+    )
+
+    # No aceptamos un estado de consulta desconocido.
+    if checked.isna().any():
+        raise ValueError(
+            "Integrated contiene estados Watchmode incoherentes."
+        )
+
+    # Películas consultadas:
+    # deben tener disponibilidad y conteo conocidos.
+    consultadas = checked.fillna(False)
+
+    invalidas_consultadas = (
+        consultadas
+        & (
+            available.isna()
+            | count.isna()
+            | (count < 0)
+            | (available.fillna(False) & (count <= 0))
+            | (~available.fillna(False) & (count != 0))
+        ).fillna(True)
+    )
+
+    # Películas no consultadas:
+    # la disponibilidad y el conteo deben ser desconocidos.
+    invalidas_no_consultadas = (
+        ~consultadas
+        & (
+            available.notna()
+            | count.notna()
+        )
+    )
+
+    if (
+        invalidas_consultadas.any()
+        or invalidas_no_consultadas.any()
+    ):
+        raise ValueError(
+            "Integrated contiene estados Watchmode incoherentes."
+        )
+
 
     return df
 
@@ -374,8 +525,6 @@ def save_integrated_metadata(
 
 
 ### FUNCION QUE ACTUA DE ORQUESTADOR 
-
-
 def run_silver_integration(
     output_dir: Path | None = None,
     run_dirs: dict[str, Path] | None = None,
@@ -399,9 +548,12 @@ def run_silver_integration(
 
         output_dir = Path(run_dirs["integrated"])
 
+
     datasets = load_silver_datasets(
         run_dirs=run_dirs,
+        include_availability=True,
     )
+
 
 
     df = build_integrated_movies(

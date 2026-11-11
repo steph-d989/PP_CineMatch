@@ -1157,6 +1157,53 @@ class BronzeToSilverTests(unittest.TestCase):
             0,
         )
 
+    
+    def test_movielens_rechaza_ratings_de_peliculas_inexistentes(self):
+
+        import pandas as pd
+
+        from src.transformation.bronze_to_silver import (
+            validate_movielens_rating_references,
+        )
+
+        movies = pd.DataFrame({
+            "movie_id": [1, 2, 3],
+            "title": [
+                "Pelicula A",
+                "Pelicula B",
+                "Pelicula C",
+            ],
+        })
+
+        ratings_validos = pd.DataFrame({
+            "user_id": [10, 11, 12],
+            "movie_id": [1, 2, 3],
+            "rating": [4.5, 3.0, 5.0],
+        })
+
+        # Todas las películas existen.
+        validate_movielens_rating_references(
+            movies=movies,
+            ratings=ratings_validos,
+        )
+
+        ratings_invalidos = pd.DataFrame({
+            "user_id": [10, 11, 12],
+            "movie_id": [1, 2, 999],
+            "rating": [4.5, 3.0, 5.0],
+        })
+
+        # La película 999 no existe.
+        with self.assertRaisesRegex(
+            ValueError,
+            "referencias a películas inexistentes",
+        ):
+            validate_movielens_rating_references(
+                movies=movies,
+                ratings=ratings_invalidos,
+            )
+
+    
     def test_watchmode_metadata_guarda_por_ejecucion(self):
 
         import json

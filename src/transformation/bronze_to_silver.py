@@ -264,6 +264,56 @@ def transform_links(
     return df
 
 
+def validate_movielens_rating_references(
+    movies: pd.DataFrame,
+    ratings: pd.DataFrame,
+) -> None:
+    """
+    Comprueba que cada rating corresponda
+    a una película existente en MovieLens.
+
+    No modifica datos ni escribe archivos.
+    """
+
+    if "movie_id" not in movies.columns:
+        raise ValueError(
+            "MovieLens movies no contiene movie_id."
+        )
+
+    if "movie_id" not in ratings.columns:
+        raise ValueError(
+            "MovieLens ratings no contiene movie_id."
+        )
+
+    if movies["movie_id"].isna().any():
+        raise ValueError(
+            "MovieLens movies contiene movie_id nulos."
+        )
+
+    if movies["movie_id"].duplicated().any():
+        raise ValueError(
+            "MovieLens movies contiene movie_id duplicados."
+        )
+
+    if ratings["movie_id"].isna().any():
+        raise ValueError(
+            "MovieLens ratings contiene movie_id nulos."
+        )
+
+    ids_validos = pd.Index(movies["movie_id"].unique())
+
+    referencias_invalidas = ~ratings["movie_id"].isin(
+        ids_validos
+    )
+
+    if referencias_invalidas.any():
+        cantidad = int(referencias_invalidas.sum())
+
+        raise ValueError(
+            "MovieLens ratings contiene "
+            f"{cantidad} referencias a películas inexistentes."
+        )
+
 ### FUNCION QUE GUARDA LOS DATASETS SILVER EN FORMATO PARQUET
 
 
