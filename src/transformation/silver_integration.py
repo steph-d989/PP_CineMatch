@@ -14,24 +14,42 @@ from src.utils.paths import (
 
 ### FUNCION QUE CARGA LOS DATASETS NECESARIOS PARA INTEGRAR LAS APIS
 
-def load_silver_datasets() -> dict[str, pd.DataFrame]:
+
+def load_silver_datasets(
+    run_dirs: dict[str, Path] | None = None,
+):
+
+    
+    movielens_dir = (
+        Path(run_dirs["movielens"])
+        if run_dirs is not None
+        else SILVER_MOVIELENS_DIR
+    )
+
+    tmdb_dir = (
+        Path(run_dirs["tmdb"])
+        if run_dirs is not None
+        else SILVER_TMDB_DIR
+    )
+
+    watchmode_dir = (
+        Path(run_dirs["watchmode"])
+        if run_dirs is not None
+        else SILVER_WATCHMODE_DIR
+    )
 
     rutas = {
         "movies": (
-            SILVER_MOVIELENS_DIR
-            / "movies.parquet"
+            movielens_dir / "movies.parquet"
         ),
         "links": (
-            SILVER_MOVIELENS_DIR
-            / "links.parquet"
+            movielens_dir / "links.parquet"
         ),
         "tmdb": (
-            SILVER_TMDB_DIR
-            / "movies_tmdb.parquet"
+            tmdb_dir / "movies_tmdb.parquet"
         ),
         "watchmode_status": (
-            SILVER_WATCHMODE_DIR
-            / "availability_status.parquet"
+            watchmode_dir / "availability_status.parquet"
         ),
     }
 
@@ -83,6 +101,16 @@ def integrate_tmdb(
         }
     )
 
+    
+    # No permitir películas TMDb sin identificador.
+    # Evita coincidencias incorrectas entre valores nulos.
+    if tmdb["tmdb_id"].isna().any():
+        raise ValueError(
+            "TMDb Silver contiene tmdb_id nulos. "
+            "No se puede realizar una integración segura."
+        )
+
+    
     duplicados_tmdb = tmdb[
         tmdb["tmdb_id"].duplicated(
             keep=False
@@ -122,16 +150,13 @@ def create_canonical_fields(
 
 ### FUNCION QUE AÑADE INFORMACION SOBRE DISPONIBILIDAD CONOCIDA EN WATCHMODE
 
+
 def integrate_watchmode_status(
     movies: pd.DataFrame,
     status: pd.DataFrame,
 ) -> pd.DataFrame:
 
-    status = status.drop_duplicates(
-        subset=["tmdb_id"]
-    )
-
-
+    # Detectar duplicados antes de integrar.
     duplicados_watchmode = status[
         status["tmdb_id"].duplicated(
             keep=False
@@ -150,19 +175,17 @@ def integrate_watchmode_status(
         validate="many_to_one",
     )
 
+    # Conservar disponibilidad desconocida.
     df["has_availability"] = (
-        df["has_availability"]
-        .fillna(False)
-        .astype(bool)
+        df["has_availability"].astype("boolean")
     )
 
     df["sources_count"] = (
-        df["sources_count"]
-        .fillna(0)
-        .astype("int64")
+        df["sources_count"].astype("Int64")
     )
 
     return df
+
 
 
 ### FUNCION QUE INTEGRA EL ESTADO DE WATCHMODE
@@ -228,19 +251,32 @@ def build_integrated_movies(
 
 ### FUNCION QUE GUARDA UN CATALOGO INTEGRADO SILVER
 
-def save_integrated_movies(
-    df: pd.DataFrame
-) -> Path:
 
-    SILVER_INTEGRATED_DIR.mkdir(
+def save_integrated_movies(
+    df: pd.DataFrame,
+    output_dir: Path | None = None,
+) -> Path:
+    """
+    Guarda el catálogo integrado Silver en Parquet.
+
+    Permite seleccionar una carpeta de ejecución.
+    Mantiene compatibilidad con la ruta anterior.
+
+    No consulta APIs ni Supabase.
+    """
+
+    destino = (
+        Path(output_dir)
+        if output_dir is not None
+        else SILVER_INTEGRATED_DIR
+    )
+
+    destino.mkdir(
         parents=True,
         exist_ok=True,
     )
 
-    ruta = (
-        SILVER_INTEGRATED_DIR
-        / "movies_integrated.parquet"
-    )
+    ruta = destino / "movies_integrated.parquet"
 
     df.to_parquet(
         ruta,
@@ -252,46 +288,56 @@ def save_integrated_movies(
 
 ### FUNCION QIE GUARDA LOS METADATOS
 
+
 def save_integrated_metadata(
-    df: pd.DataFrame
+    df: pd.DataFrame,
+    output_dir: Path | None = None,
 ) -> Path:
+    """
+    Guarda los metadatos del catálogo integrado.
+
+    Permite seleccionar una carpeta por ejecución.
+    Mantiene compatibilidad con la ubicación anterior.
+
+    No consulta APIs ni Supabase.
+    """
+
+    destino = (
+        Path(output_dir)
+        if output_dir is not None
+        else SILVER_INTEGRATED_DIR
+    )
+
+    destino.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     metadata = {
         "dataset": "movies_integrated",
         "capa": "silver",
-        "fecha_transformacion": (
-            datetime.now().isoformat()
-        ),
+        "fecha_transformacion": datetime.now().isoformat(),
         "formato": "parquet",
         "filas": len(df),
         "columnas": len(df.columns),
         "con_tmdb": int(
-            df["tmdb_title"]
-            .notna()
-            .sum()
+            df["tmdb_title"].notna().sum()
         ),
         "watchmode_consultadas": int(
-            df["watchmode_checked"]
-            .sum()
+            df["watchmode_checked"].sum()
         ),
         "con_disponibilidad": int(
-            df["has_availability"]
-            .sum()
+            df["has_availability"].sum()
         ),
         "estado": "success",
     }
 
-    ruta = (
-        SILVER_INTEGRATED_DIR
-        / "_metadata.json"
-    )
+    ruta_metadata = destino / "_metadata.json"
 
-    with open(
-        ruta,
+    with ruta_metadata.open(
         "w",
         encoding="utf-8",
     ) as archivo:
-
         json.dump(
             metadata,
             archivo,
@@ -299,30 +345,54 @@ def save_integrated_metadata(
             indent=2,
         )
 
-    return ruta
+    return ruta_metadata
 
 
 ### FUNCION QUE ACTUA DE ORQUESTADOR 
 
-def run_silver_integration():
+
+def run_silver_integration(
+    output_dir: Path | None = None,
+    run_dirs: dict[str, Path] | None = None,
+):
+
 
     print("=" * 60)
     print("INTEGRACIÓN SILVER CINEMATCH")
     print("=" * 60)
 
-    datasets = load_silver_datasets()
+    
+    if run_dirs is not None:
+
+        if output_dir is not None and (
+            Path(output_dir) != Path(run_dirs["integrated"])
+        ):
+            raise ValueError(
+                "El directorio Integrated no coincide "
+                "con la ejecución seleccionada."
+            )
+
+        output_dir = Path(run_dirs["integrated"])
+
+    datasets = load_silver_datasets(
+        run_dirs=run_dirs,
+    )
+
 
     df = build_integrated_movies(
         datasets
     )
 
     ruta = save_integrated_movies(
-        df
+        df=df,
+        output_dir=output_dir,
     )
 
+
     metadata = save_integrated_metadata(
-        df
-    )
+            df=df,
+            output_dir=output_dir,
+        )
 
     print(
         "Películas integradas:",

@@ -4,6 +4,12 @@ from pathlib import Path
 
 import pandas as pd
 
+from src.ingestion.watchmode import (
+    get_local_watchmode_files,
+    validate_watchmode_local_file,
+    get_watchmode_provenance,
+)
+
 from src.utils.paths import (
     BRONZE_MOVIELENS_DIR,
     BRONZE_TMDB_DIR,
@@ -41,7 +47,15 @@ def load_movielens_bronze() -> dict[str, pd.DataFrame]:
                 f"No se encontró: {ruta}"
             )
 
-        datasets[nombre] = pd.read_csv(ruta)
+        if nombre == "links":
+            # IMDb es un identificador, no una cantidad.
+            # Leerlo como texto conserva los ceros iniciales.
+            datasets[nombre] = pd.read_csv(
+                ruta,
+                dtype={"imdbId": "string"},
+            )
+        else:
+            datasets[nombre] = pd.read_csv(ruta)
 
     return datasets
 
@@ -198,9 +212,20 @@ def transform_links(
 
     df = df.copy()
 
-    df = df.drop_duplicates(
-        subset=["movieId"]
-    )
+    # Eliminar únicamente filas idénticas.
+    df = df.drop_duplicates()
+
+    # Comprobar que un movieId no tenga
+    # identificadores contradictorios.
+    duplicados = df[
+        df["movieId"].duplicated(keep=False)
+    ]
+
+    if not duplicados.empty:
+        raise ValueError(
+            "MovieLens links contiene movieId "
+            "duplicados con información diferente."
+        )
 
     df["movieId"] = pd.to_numeric(
         df["movieId"],
@@ -212,11 +237,20 @@ def transform_links(
         errors="coerce"
     ).astype("Int64")
 
-    # IMDb se trata como identificador, no variable numérica.
+    # Los identificadores TMDb deben ser positivos.
+    # Los valores cero o negativos se consideran
+    # desconocidos, sin eliminar la película.
+    df["tmdbId"] = df["tmdbId"].where(
+        df["tmdbId"] > 0,
+        pd.NA,
+    )
+
+    # Conservar IMDb como texto.
+    # No convertir primero a entero.
     df["imdbId"] = (
         df["imdbId"]
-        .astype("Int64")
         .astype("string")
+        .str.strip()
     )
 
     df = df.rename(
@@ -232,29 +266,45 @@ def transform_links(
 
 ### FUNCION QUE GUARDA LOS DATASETS SILVER EN FORMATO PARQUET
 
-def save_movielens_silver(
-    datasets: dict[str, pd.DataFrame]
-) -> dict:
 
-    SILVER_MOVIELENS_DIR.mkdir(
+def save_movielens_silver(
+    datasets: dict[str, pd.DataFrame],
+    output_dir: Path | None = None,
+) -> dict:
+    """
+    Guarda los datasets MovieLens en formato Parquet.
+
+    Permite utilizar una carpeta específica por
+    ejecución, conservando compatibilidad con
+    la ubicación Silver anterior.
+
+    No consulta APIs ni Supabase.
+    """
+
+    # Seleccionar la carpeta de esta ejecución.
+    destino = (
+        Path(output_dir)
+        if output_dir is not None
+        else SILVER_MOVIELENS_DIR
+    )
+
+    destino.mkdir(
         parents=True,
         exist_ok=True,
     )
 
     rutas = {}
 
-    for nombre in [
+    # Guardar los tres datasets principales.
+    for nombre in (
         "movies",
         "tags",
         "links",
-    ]:
+    ):
 
         df = datasets[nombre]
 
-        ruta = (
-            SILVER_MOVIELENS_DIR
-            / f"{nombre}.parquet"
-        )
+        ruta = destino / f"{nombre}.parquet"
 
         df.to_parquet(
             ruta,
@@ -263,10 +313,10 @@ def save_movielens_silver(
 
         rutas[nombre] = ruta
 
-    rutas["ratings"] = (
-        save_ratings_partitioned(
-            datasets["ratings"]
-        )
+    # Guardar ratings dentro de la misma ejecución.
+    rutas["ratings"] = save_ratings_partitioned(
+        df=datasets["ratings"],
+        output_dir=destino / "ratings",
     )
 
     return rutas
@@ -274,9 +324,29 @@ def save_movielens_silver(
 
 ### FUNCION QUE GUARDA LA METADATA SILVER 
 
+
 def save_movielens_silver_metadata(
-    datasets: dict[str, pd.DataFrame]
+    datasets: dict[str, pd.DataFrame],
+    output_dir: Path | None = None,
 ) -> Path:
+    """
+    Guarda los metadatos de MovieLens Silver.
+
+    Permite utilizar una carpeta específica por
+    ejecución sin perder compatibilidad con
+    la ubicación anterior.
+    """
+
+    destino = (
+        Path(output_dir)
+        if output_dir is not None
+        else SILVER_MOVIELENS_DIR
+    )
+
+    destino.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     metadata = {
         "fuente": "MovieLens",
@@ -290,23 +360,18 @@ def save_movielens_silver_metadata(
                 "filas": len(df),
                 "columnas": len(df.columns),
             }
-            for nombre, df
-            in datasets.items()
+            for nombre, df in datasets.items()
         },
         "estado": "success",
     }
 
-    ruta_metadata = (
-        SILVER_MOVIELENS_DIR
-        / "_metadata.json"
-    )
+    ruta_metadata = destino / "_metadata.json"
 
     with open(
         ruta_metadata,
         "w",
         encoding="utf-8",
     ) as archivo:
-
         json.dump(
             metadata,
             archivo,
@@ -318,21 +383,69 @@ def save_movielens_silver_metadata(
 
 ### FUNCION QUE GUARDA LOS RATINGS PARTICIONADOS
 
+
 def save_ratings_partitioned(
     df: pd.DataFrame,
     rows_per_file: int = 2_000_000,
+    output_dir: Path | None = None,
 ) -> list[Path]:
 
+
+
+    # Si se proporciona una carpeta, utilizarla.
+    # En caso contrario, conservar la ruta anterior.
     ratings_dir = (
-        SILVER_MOVIELENS_DIR
-        / "ratings"
+        Path(output_dir)
+        if output_dir is not None
+        else SILVER_MOVIELENS_DIR / "ratings"
     )
+
 
     ratings_dir.mkdir(
         parents=True,
         exist_ok=True,
     )
 
+    
+    # Validar el tamaño de cada partición.
+    if rows_per_file <= 0:
+        raise ValueError(
+            "rows_per_file debe ser mayor que cero"
+        )
+
+    # Calcular las particiones que necesita
+    # la nueva ejecución.
+    cantidad_esperada = len(
+        range(0, len(df), rows_per_file)
+    )
+
+    nombres_esperados = {
+        f"part_{i:03d}.parquet"
+        for i in range(cantidad_esperada)
+    }
+
+    # Identificar particiones existentes.
+    nombres_existentes = {
+        archivo.name
+        for archivo in ratings_dir.glob("part_*.parquet")
+        if archivo.is_file()
+    }
+
+    # Identificar archivos que pertenecen
+    # a una ejecución anterior.
+    particiones_obsoletas = (
+        nombres_existentes - nombres_esperados
+    )
+
+    if particiones_obsoletas:
+        raise RuntimeError(
+            "Se detectaron particiones antiguas "
+            "de ratings que no pertenecen a la "
+            "nueva ejecución: "
+            + ", ".join(sorted(particiones_obsoletas))
+        )
+
+    
     rutas = []
 
     total_rows = len(df)
@@ -376,7 +489,10 @@ def save_ratings_partitioned(
 
 ### FUNCION QUE EJECUTA TRANSFORMACION BRONZE A SILVER
 
-def run_movielens_bronze_to_silver():
+def run_movielens_bronze_to_silver(
+    output_dir: Path | None = None,
+):
+
 
     print("=" * 50)
     print("MOVIELENS: BRONZE -> SILVER")
@@ -399,15 +515,19 @@ def run_movielens_bronze_to_silver():
         ),
     }
 
+
     rutas = save_movielens_silver(
-        silver
+        datasets=silver,
+        output_dir=output_dir,
     )
 
-    metadata = (
-        save_movielens_silver_metadata(
-            silver
-        )
+
+
+    metadata = save_movielens_silver_metadata(
+        datasets=silver,
+        output_dir=output_dir,
     )
+
 
     print("\nDatasets generados:")
 
@@ -593,18 +713,51 @@ def clean_tmdb_movies(
     df: pd.DataFrame
 ) -> pd.DataFrame:
 
-    df = df.copy()
 
-    # Duplicados
-    df = df.drop_duplicates(
+    df = df.copy()
+    
+    
+    # Verificar que existan películas para procesar.
+    if df.empty:
+        raise ValueError(
+            "TMDb Silver no contiene películas "
+            "para procesar."
+        )
+
+
+    # 1. Convertir el identificador al tipo esperado.
+    df["tmdb_id"] = pd.to_numeric(
+        df["tmdb_id"],
+        errors="coerce",
+    ).astype("Int64")
+
+    # 2. Eliminar registros sin identificador.
+    df = df.dropna(
         subset=["tmdb_id"]
     )
 
-    # ID
-    df["tmdb_id"] = pd.to_numeric(
-        df["tmdb_id"],
-        errors="coerce"
-    ).astype("Int64")
+    
+    # Comprobar que la limpieza no eliminó
+    # todos los registros de películas.
+    if df.empty:
+        raise ValueError(
+            "TMDb Silver no contiene películas "
+            "con identificadores válidos."
+        )
+
+    
+    # 3. Comprobar duplicados antes de descartarlos.
+    duplicados = df[
+        df["tmdb_id"].duplicated(
+            keep=False
+        )
+    ]
+
+    if not duplicados.empty:
+        raise ValueError(
+            "TMDb Silver contiene tmdb_id duplicados."
+        )
+
 
     # Fecha
     df["release_date"] = pd.to_datetime(
@@ -657,19 +810,30 @@ def clean_tmdb_movies(
 
 ### FUNCION QUE GUARDA TMDN SILVER COMO PARQUET
 
-def save_tmdb_silver(
-    df: pd.DataFrame
-) -> Path:
 
-    SILVER_TMDB_DIR.mkdir(
+def save_tmdb_silver(
+    df: pd.DataFrame,
+    output_dir: Path | None = None,
+) -> Path:
+    """
+    Guarda las películas TMDb procesadas en Parquet.
+
+    Permite seleccionar una carpeta de ejecución.
+    Mantiene compatibilidad con la ruta anterior.
+    """
+
+    destino = (
+        Path(output_dir)
+        if output_dir is not None
+        else SILVER_TMDB_DIR
+    )
+
+    destino.mkdir(
         parents=True,
         exist_ok=True,
     )
 
-    ruta = (
-        SILVER_TMDB_DIR
-        / "movies_tmdb.parquet"
-    )
+    ruta = destino / "movies_tmdb.parquet"
 
     df.to_parquet(
         ruta,
@@ -681,33 +845,46 @@ def save_tmdb_silver(
 
 ### FUNCION QUE GUARDA METADATA TMDB SILVER
 
+
 def save_tmdb_silver_metadata(
-    df: pd.DataFrame
+    df: pd.DataFrame,
+    output_dir: Path | None = None,
 ) -> Path:
+    """
+    Guarda los metadatos de TMDb Silver.
+
+    Permite seleccionar una carpeta por ejecución
+    y mantiene compatibilidad con la ruta anterior.
+    """
+
+    destino = (
+        Path(output_dir)
+        if output_dir is not None
+        else SILVER_TMDB_DIR
+    )
+
+    destino.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     metadata = {
         "fuente": "TMDb",
         "capa": "silver",
-        "fecha_transformacion": (
-            datetime.now().isoformat()
-        ),
+        "fecha_transformacion": datetime.now().isoformat(),
         "formato": "parquet",
         "filas": len(df),
         "columnas": len(df.columns),
         "estado": "success",
     }
 
-    ruta_metadata = (
-        SILVER_TMDB_DIR
-        / "_metadata.json"
-    )
+    ruta_metadata = destino / "_metadata.json"
 
     with open(
         ruta_metadata,
         "w",
         encoding="utf-8",
     ) as archivo:
-
         json.dump(
             metadata,
             archivo,
@@ -720,7 +897,10 @@ def save_tmdb_silver_metadata(
 
 ### FUNCION PRINCIPAL DE TMDB BRONZE A SILVER
 
-def run_tmdb_bronze_to_silver():
+def run_tmdb_bronze_to_silver(
+    output_dir: Path | None = None,
+):
+
 
     print("=" * 50)
     print("TMDb: BRONZE -> SILVER")
@@ -742,14 +922,17 @@ def run_tmdb_bronze_to_silver():
     )
 
     ruta = save_tmdb_silver(
-        df
+        df=df,
+        output_dir=output_dir,
     )
 
-    metadata = (
-        save_tmdb_silver_metadata(
-            df
-        )
+
+
+    metadata = save_tmdb_silver_metadata(
+        df=df,
+        output_dir=output_dir,
     )
+
 
     print(
         "Dataset generado:",
@@ -780,47 +963,84 @@ def run_tmdb_bronze_to_silver():
 
 ### FUNCION QUE CARGA LOS JSON DE DISPONIBILIDAD ALMACENADOS EN BRONZE
 
-def load_watchmode_bronze() -> list[dict]:
 
-    archivos = list(
-        BRONZE_WATCHMODE_DIR.glob(
-            "movie_*_sources.json"
-        )
+def load_watchmode_bronze(
+    region: str = "PE",
+) -> list[dict]:
+    """
+    Carga archivos Watchmode desde Bronze.
+
+    Solo acepta archivos:
+    - Con estructura JSON válida.
+    - Con procedencia regional verificada.
+    - Con metadatos coherentes con el contenido.
+
+    No modifica archivos ni consulta APIs.
+    """
+
+    archivos = get_local_watchmode_files(
+        region=region
     )
 
     if not archivos:
         raise FileNotFoundError(
-            f"No se encontraron JSON Watchmode en "
-            f"{BRONZE_WATCHMODE_DIR}"
+            f"No se encontraron archivos Watchmode "
+            f"para la región {region.upper()}"
         )
 
     registros = []
 
     for archivo in archivos:
 
-        try:
-            with open(
-                archivo,
-                "r",
-                encoding="utf-8",
-            ) as f:
-                data = json.load(f)
+        validacion = validate_watchmode_local_file(
+            archivo
+        )
 
-            tmdb_id = (
-                archivo.stem
-                .replace("movie_", "")
-                .replace("_sources", "")
+        if not validacion["valid"]:
+            print(
+                f"{archivo.name}: archivo inválido. "
+                "Se omite."
+            )
+            continue
+
+        tmdb_id = validacion["tmdb_id"]
+
+        procedencia = get_watchmode_provenance(
+            tmdb_id=tmdb_id,
+            region=region,
+        )
+
+        if (
+            procedencia["status"] != "verified"
+            or not procedencia["region_verified"]
+        ):
+            print(
+                f"{archivo.name}: procedencia "
+                "no verificada. Se omite."
+            )
+            continue
+
+        try:
+            data = json.loads(
+                archivo.read_text(encoding="utf-8")
             )
 
             registros.append({
-                "tmdb_id": int(tmdb_id),
+                "tmdb_id": tmdb_id,
                 "sources": data,
             })
 
-        except Exception as error:
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
             print(
-                f"Error leyendo {archivo.name}: {error}"
+                f"{archivo.name}: error de lectura "
+                f"- {error}"
             )
+
+    if not registros:
+        raise ValueError(
+            "No existen archivos Watchmode válidos "
+            "y con procedencia verificada."
+        )
 
     return registros
 
@@ -860,7 +1080,25 @@ def transform_watchmode_sources(
                 ),
             })
 
-    return pd.DataFrame(filas)
+
+    columnas = [
+        "tmdb_id",
+        "source_id",
+        "provider_name",
+        "type",
+        "region",
+        "format",
+        "price",
+        "web_url",
+        "ios_url",
+        "android_url",
+    ]
+
+    return pd.DataFrame(
+        filas,
+        columns=columnas,
+    )
+
 
 
 ### FUNCION QUE LIMPIA Y ESTADARIZA LA DISPONIBILIDAD
@@ -869,10 +1107,27 @@ def clean_watchmode_sources(
     df: pd.DataFrame
 ) -> pd.DataFrame:
 
+
     df = df.copy()
 
+    # Una tabla vacía también necesita tipos definidos.
     if df.empty:
+
+        df = df.astype({
+            "tmdb_id": "Int64",
+            "source_id": "Int64",
+            "provider_name": "string",
+            "type": "string",
+            "region": "string",
+            "format": "string",
+            "price": "Float64",
+            "web_url": "string",
+            "ios_url": "string",
+            "android_url": "string",
+        })
+
         return df
+
 
     df = df.drop_duplicates()
 
@@ -952,88 +1207,98 @@ def transform_watchmode_status(
 def save_watchmode_silver(
     availability_df: pd.DataFrame,
     status_df: pd.DataFrame,
+    output_dir: Path | None = None,
 ) -> dict[str, Path]:
+    """
+    Guarda los datasets Watchmode en formato Parquet.
 
-    SILVER_WATCHMODE_DIR.mkdir(
+    Permite seleccionar una carpeta por ejecución.
+    Mantiene compatibilidad con la ruta anterior.
+
+    No consulta APIs ni Supabase.
+    """
+
+    destino = (
+        Path(output_dir)
+        if output_dir is not None
+        else SILVER_WATCHMODE_DIR
+    )
+
+    destino.mkdir(
         parents=True,
         exist_ok=True,
     )
 
-    rutas = {}
-
-    ruta_availability = (
-        SILVER_WATCHMODE_DIR
-        / "availability.parquet"
-    )
+    # 1. Guardar las plataformas disponibles.
+    ruta_availability = destino / "availability.parquet"
 
     availability_df.to_parquet(
         ruta_availability,
         index=False,
     )
 
-    rutas["availability"] = (
-        ruta_availability
-    )
-
-    ruta_status = (
-        SILVER_WATCHMODE_DIR
-        / "availability_status.parquet"
-    )
+    # 2. Guardar el estado de consulta por película.
+    ruta_status = destino / "availability_status.parquet"
 
     status_df.to_parquet(
         ruta_status,
         index=False,
     )
 
-    rutas["availability_status"] = (
-        ruta_status
-    )
-
-    return rutas
-
+    return {
+        "availability": ruta_availability,
+        "availability_status": ruta_status,
+    }
 
 ### FUNCIONQ UE GUARDA METADATA WATCHMODE SILVER
+
 
 def save_watchmode_silver_metadata(
     availability_df: pd.DataFrame,
     status_df: pd.DataFrame,
+    output_dir: Path | None = None,
 ) -> Path:
+    """
+    Guarda los metadatos de Watchmode Silver.
+
+    Permite seleccionar una carpeta de ejecución.
+    Mantiene compatibilidad con la ubicación anterior.
+
+    No consulta APIs ni Supabase.
+    """
+
+    destino = (
+        Path(output_dir)
+        if output_dir is not None
+        else SILVER_WATCHMODE_DIR
+    )
+
+    destino.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     metadata = {
         "fuente": "Watchmode",
         "capa": "silver",
-        "fecha_transformacion": (
-            datetime.now().isoformat()
-        ),
+        "fecha_transformacion": datetime.now().isoformat(),
         "formato": "parquet",
         "datasets": {
             "availability": {
-                "filas": len(
-                    availability_df
-                ),
-                "columnas": len(
-                    availability_df.columns
-                ),
+                "filas": len(availability_df),
+                "columnas": len(availability_df.columns),
             },
             "availability_status": {
-                "filas": len(
-                    status_df
-                ),
-                "columnas": len(
-                    status_df.columns
-                ),
+                "filas": len(status_df),
+                "columnas": len(status_df.columns),
             },
         },
         "estado": "success",
     }
 
-    ruta_metadata = (
-        SILVER_WATCHMODE_DIR
-        / "_metadata.json"
-    )
+    ruta_metadata = destino / "_metadata.json"
 
-    with open(
-        ruta_metadata,
+    with ruta_metadata.open(
         "w",
         encoding="utf-8",
     ) as archivo:
@@ -1049,7 +1314,9 @@ def save_watchmode_silver_metadata(
 
 ### FUNCION PRINCIPAL QUE EJECUTA WATCHMODE DE BRONZE A SILVER
 
-def run_watchmode_bronze_to_silver():
+def run_watchmode_bronze_to_silver(
+    output_dir: Path | None = None,
+):
 
     print("=" * 50)
     print("WATCHMODE: BRONZE -> SILVER")
@@ -1080,17 +1347,19 @@ def run_watchmode_bronze_to_silver():
         )
     )
 
+
     rutas = save_watchmode_silver(
-        availability_df,
-        status_df,
+        availability_df=availability_df,
+        status_df=status_df,
+        output_dir=output_dir,
     )
 
-    metadata = (
-        save_watchmode_silver_metadata(
-            availability_df,
-            status_df,
-        )
+    metadata = save_watchmode_silver_metadata(
+        availability_df=availability_df,
+        status_df=status_df,
+        output_dir=output_dir,
     )
+
 
     print("\nDatasets generados:")
 
