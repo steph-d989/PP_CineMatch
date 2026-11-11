@@ -19,9 +19,7 @@ from src.utils.paths import (
     SILVER_WATCHMODE_DIR,
 )
 
-
 ### FUNCION QUE CARGA LOS CSV DE MOVIELENS DESDE BRONZE
-
 def load_movielens_bronze() -> dict[str, pd.DataFrame]:
 
     source_dir = (
@@ -59,9 +57,7 @@ def load_movielens_bronze() -> dict[str, pd.DataFrame]:
 
     return datasets
 
-
 ### FUNCION QUE LIMPIA Y ESTANDARIZA MOVIES.CSV PARA SILVER
-
 def transform_movies(
     df: pd.DataFrame
 ) -> pd.DataFrame:
@@ -103,9 +99,7 @@ def transform_movies(
 
     return df
 
-
 ### FUNCION QUE LIMPIA Y ESTANDARIZA RATINGS.CSV
-
 def transform_ratings(
     df: pd.DataFrame
 ) -> pd.DataFrame:
@@ -156,9 +150,7 @@ def transform_ratings(
 
     return df
 
-
 ### FUNCION QUE LIMPIA Y ESTADARIZA TAGS.CSV
-
 def transform_tags(
     df: pd.DataFrame
 ) -> pd.DataFrame:
@@ -203,9 +195,7 @@ def transform_tags(
 
     return df
 
-
 ### FUNCION QUE LIMPIA Y ESTADARIZA LINKS.CSV
-
 def transform_links(
     df: pd.DataFrame
 ) -> pd.DataFrame:
@@ -263,17 +253,11 @@ def transform_links(
 
     return df
 
-
+### FUNCION QUE COMPRUEBA QUE CADA RATING CORRESPONDA A UNA PELICULA DE MOVIELENS
 def validate_movielens_rating_references(
     movies: pd.DataFrame,
     ratings: pd.DataFrame,
 ) -> None:
-    """
-    Comprueba que cada rating corresponda
-    a una película existente en MovieLens.
-
-    No modifica datos ni escribe archivos.
-    """
 
     if "movie_id" not in movies.columns:
         raise ValueError(
@@ -314,22 +298,54 @@ def validate_movielens_rating_references(
             f"{cantidad} referencias a películas inexistentes."
         )
 
+### FUNCION QUE COMPRUEBA QUE LOS TAGS HAGAN REFERENCIA A PELICULAS EXISTENTE
+def validate_movielens_tag_references(
+    movies: pd.DataFrame,
+    tags: pd.DataFrame,
+) -> None:
+
+    if "movie_id" not in movies.columns:
+        raise ValueError(
+            "MovieLens movies no contiene movie_id."
+        )
+
+    if "movie_id" not in tags.columns:
+        raise ValueError(
+            "MovieLens tags no contiene movie_id."
+        )
+
+    if movies["movie_id"].isna().any():
+        raise ValueError(
+            "MovieLens movies contiene movie_id nulos."
+        )
+
+    if movies["movie_id"].duplicated().any():
+        raise ValueError(
+            "MovieLens movies contiene movie_id duplicados."
+        )
+
+    if tags["movie_id"].isna().any():
+        raise ValueError(
+            "MovieLens tags contiene movie_id nulos."
+        )
+
+    referencias_invalidas = ~tags["movie_id"].isin(
+        movies["movie_id"]
+    )
+
+    if referencias_invalidas.any():
+        cantidad = int(referencias_invalidas.sum())
+
+        raise ValueError(
+            "MovieLens tags contiene "
+            f"{cantidad} referencias a películas inexistentes."
+        )
+
 ### FUNCION QUE GUARDA LOS DATASETS SILVER EN FORMATO PARQUET
-
-
 def save_movielens_silver(
     datasets: dict[str, pd.DataFrame],
     output_dir: Path | None = None,
 ) -> dict:
-    """
-    Guarda los datasets MovieLens en formato Parquet.
-
-    Permite utilizar una carpeta específica por
-    ejecución, conservando compatibilidad con
-    la ubicación Silver anterior.
-
-    No consulta APIs ni Supabase.
-    """
 
     # Seleccionar la carpeta de esta ejecución.
     destino = (
@@ -371,21 +387,11 @@ def save_movielens_silver(
 
     return rutas
 
-
 ### FUNCION QUE GUARDA LA METADATA SILVER 
-
-
 def save_movielens_silver_metadata(
     datasets: dict[str, pd.DataFrame],
     output_dir: Path | None = None,
 ) -> Path:
-    """
-    Guarda los metadatos de MovieLens Silver.
-
-    Permite utilizar una carpeta específica por
-    ejecución sin perder compatibilidad con
-    la ubicación anterior.
-    """
 
     destino = (
         Path(output_dir)
@@ -432,15 +438,11 @@ def save_movielens_silver_metadata(
     return ruta_metadata
 
 ### FUNCION QUE GUARDA LOS RATINGS PARTICIONADOS
-
-
 def save_ratings_partitioned(
     df: pd.DataFrame,
     rows_per_file: int = 2_000_000,
     output_dir: Path | None = None,
 ) -> list[Path]:
-
-
 
     # Si se proporciona una carpeta, utilizarla.
     # En caso contrario, conservar la ruta anterior.
@@ -536,13 +538,10 @@ def save_ratings_partitioned(
 
     return rutas
 
-
 ### FUNCION QUE EJECUTA TRANSFORMACION BRONZE A SILVER
-
 def run_movielens_bronze_to_silver(
     output_dir: Path | None = None,
 ):
-
 
     print("=" * 50)
     print("MOVIELENS: BRONZE -> SILVER")
@@ -564,6 +563,22 @@ def run_movielens_bronze_to_silver(
             bronze["links"]
         ),
     }
+
+    
+    # Comprobar la integridad referencial antes
+    # de guardar los datasets MovieLens Silver.
+    validate_movielens_rating_references(
+        movies=silver["movies"],
+        ratings=silver["ratings"],
+    )
+
+    
+    # Validar las referencias de tags antes
+    # de guardar los archivos MovieLens Silver.
+    validate_movielens_tag_references(
+        movies=silver["movies"],
+        tags=silver["tags"],
+    )
 
 
     rutas = save_movielens_silver(
@@ -599,9 +614,7 @@ def run_movielens_bronze_to_silver(
 
     return silver
 
-
 ### FUNCION QUE CARGA LOS JSON DE PELICULAS TMDB ALMACENADAS A BRONZE
-
 def load_tmdb_bronze() -> list[dict]:
 
     archivos = list(
@@ -635,9 +648,7 @@ def load_tmdb_bronze() -> list[dict]:
 
     return registros
 
-
 ### FUNCION QUE NORMALIZA LOS JSON TMDB Y GENERA UN DF LIMPIO PARA SILVER
-
 def transform_tmdb_movies(
     registros: list[dict]
 ) -> pd.DataFrame:
@@ -756,17 +767,13 @@ def transform_tmdb_movies(
 
     return df
 
-
 ### FUNCION QUE LIMPIA Y TIPA EL DF TMDB
-
 def clean_tmdb_movies(
     df: pd.DataFrame
 ) -> pd.DataFrame:
 
-
     df = df.copy()
-    
-    
+        
     # Verificar que existan películas para procesar.
     if df.empty:
         raise ValueError(
@@ -857,20 +864,11 @@ def clean_tmdb_movies(
 
     return df
 
-
 ### FUNCION QUE GUARDA TMDN SILVER COMO PARQUET
-
-
 def save_tmdb_silver(
     df: pd.DataFrame,
     output_dir: Path | None = None,
 ) -> Path:
-    """
-    Guarda las películas TMDb procesadas en Parquet.
-
-    Permite seleccionar una carpeta de ejecución.
-    Mantiene compatibilidad con la ruta anterior.
-    """
 
     destino = (
         Path(output_dir)
@@ -892,20 +890,11 @@ def save_tmdb_silver(
 
     return ruta
 
-
 ### FUNCION QUE GUARDA METADATA TMDB SILVER
-
-
 def save_tmdb_silver_metadata(
     df: pd.DataFrame,
     output_dir: Path | None = None,
 ) -> Path:
-    """
-    Guarda los metadatos de TMDb Silver.
-
-    Permite seleccionar una carpeta por ejecución
-    y mantiene compatibilidad con la ruta anterior.
-    """
 
     destino = (
         Path(output_dir)
@@ -944,13 +933,10 @@ def save_tmdb_silver_metadata(
 
     return ruta_metadata
 
-
 ### FUNCION PRINCIPAL DE TMDB BRONZE A SILVER
-
 def run_tmdb_bronze_to_silver(
     output_dir: Path | None = None,
 ):
-
 
     print("=" * 50)
     print("TMDb: BRONZE -> SILVER")
@@ -1010,23 +996,10 @@ def run_tmdb_bronze_to_silver(
 
     return df
 
-
 ### FUNCION QUE CARGA LOS JSON DE DISPONIBILIDAD ALMACENADOS EN BRONZE
-
-
 def load_watchmode_bronze(
     region: str = "PE",
 ) -> list[dict]:
-    """
-    Carga archivos Watchmode desde Bronze.
-
-    Solo acepta archivos:
-    - Con estructura JSON válida.
-    - Con procedencia regional verificada.
-    - Con metadatos coherentes con el contenido.
-
-    No modifica archivos ni consulta APIs.
-    """
 
     archivos = get_local_watchmode_files(
         region=region
@@ -1094,9 +1067,7 @@ def load_watchmode_bronze(
 
     return registros
 
-
 ### FUNCION QUE NORMALIZA DISPONIBILIDAD A FILAS TABULARES
-
 def transform_watchmode_sources(
     registros: list[dict]
 ) -> pd.DataFrame:
@@ -1149,10 +1120,7 @@ def transform_watchmode_sources(
         columns=columnas,
     )
 
-
-
 ### FUNCION QUE LIMPIA Y ESTADARIZA LA DISPONIBILIDAD
-
 def clean_watchmode_sources(
     df: pd.DataFrame
 ) -> pd.DataFrame:
@@ -1220,9 +1188,7 @@ def clean_watchmode_sources(
 
     return df
 
-
 ### FUNCION QUE CREA UNA TABLA DE ESTADO POR PELICULA
-
 def transform_watchmode_status(
     registros: list[dict]
 ) -> pd.DataFrame:
@@ -1250,10 +1216,7 @@ def transform_watchmode_status(
 
     return pd.DataFrame(filas)
 
-
-
 ### FUNCION QUE GUARDA WATCHMODE SILVER
-
 def save_watchmode_silver(
     availability_df: pd.DataFrame,
     status_df: pd.DataFrame,
@@ -1301,8 +1264,6 @@ def save_watchmode_silver(
     }
 
 ### FUNCIONQ UE GUARDA METADATA WATCHMODE SILVER
-
-
 def save_watchmode_silver_metadata(
     availability_df: pd.DataFrame,
     status_df: pd.DataFrame,
@@ -1361,9 +1322,7 @@ def save_watchmode_silver_metadata(
 
     return ruta_metadata
 
-
 ### FUNCION PRINCIPAL QUE EJECUTA WATCHMODE DE BRONZE A SILVER
-
 def run_watchmode_bronze_to_silver(
     output_dir: Path | None = None,
 ):
@@ -1433,8 +1392,7 @@ def run_watchmode_bronze_to_silver(
         "availability": availability_df,
         "availability_status": status_df,
     }
-    
-    
+
 if __name__ == "__main__":
     run_movielens_bronze_to_silver()
     print()

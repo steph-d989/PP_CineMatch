@@ -1,32 +1,132 @@
-
 import unittest
 import pandas as pd
+import json
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from src.transformation.bronze_to_silver import (
-    load_watchmode_bronze,
-    load_movielens_bronze,
-    transform_links,
-)
+from src.transformation.bronze_to_silver import * 
 
-from src.ingestion.watchmode import (
-    save_watchmode_raw,
-    save_watchmode_provenance,
-)
+from src.ingestion.watchmode import *
+
+from src.utils.silver_runs import *
+
 
 class BronzeToSilverTests(unittest.TestCase):
 
+    ### FUNCION QUE TIENE RATINGS VALIDOS PERO APUNTA A UN TAG QUE TIENE PELICULA INEXISTENTE.
+    def test_pipeline_movielens_bloquea_tags_huerfanos(self):
+
+        # Ratings válidos, pero un tag apunta
+        # a una película que no existe.
+        bronze = {
+            "movies": pd.DataFrame({
+                "movieId": [1, 2],
+                "title": [
+                    "Pelicula A",
+                    "Pelicula B",
+                ],
+                "genres": [
+                    "Drama",
+                    "Comedy",
+                ],
+            }),
+            "ratings": pd.DataFrame({
+                "userId": [10],
+                "movieId": [1],
+                "rating": [4.5],
+                "timestamp": [1700000000],
+            }),
+            "tags": pd.DataFrame({
+                "userId": [11],
+                "movieId": [999],
+                "tag": ["Suspenso"],
+                "timestamp": [1700000000],
+            }),
+            "links": pd.DataFrame({
+                "movieId": [1, 2],
+                "imdbId": ["0000550", "0000600"],
+                "tmdbId": [550, 600],
+            }),
+        }
+
+        with TemporaryDirectory() as temporal:
+
+            destino = Path(temporal) / "movielens"
+
+            with (
+                patch(
+                    "src.transformation.bronze_to_silver."
+                    "load_movielens_bronze",
+                    return_value=bronze,
+                ),
+                patch(
+                    "src.transformation.bronze_to_silver."
+                    "save_movielens_silver",
+                ) as mock_parquet,
+                patch(
+                    "src.transformation.bronze_to_silver."
+                    "save_movielens_silver_metadata",
+                ) as mock_metadata,
+            ):
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "referencias a películas inexistentes",
+                ):
+                    run_movielens_bronze_to_silver(
+                        output_dir=destino,
+                    )
+
+            # Ningún archivo debe guardarse.
+            mock_parquet.assert_not_called()
+            mock_metadata.assert_not_called()
+
+            self.assertFalse(destino.exists())
+
+    
+    def test_movielens_rechaza_tags_de_peliculas_inexistentes(self):
+
+        movies = pd.DataFrame({
+            "movie_id": [1, 2, 3],
+            "title": [
+                "Pelicula A",
+                "Pelicula B",
+                "Pelicula C",
+            ],
+        })
+
+        tags_validos = pd.DataFrame({
+            "user_id": [10, 11],
+            "movie_id": [1, 2],
+            "tag": ["Drama", "Suspenso"],
+        })
+
+        # Todas las etiquetas tienen películas válidas.
+        validate_movielens_tag_references(
+            movies=movies,
+            tags=tags_validos,
+        )
+
+        tags_invalidos = pd.DataFrame({
+            "user_id": [10, 11],
+            "movie_id": [1, 999],
+            "tag": ["Drama", "Ciencia ficcion"],
+        })
+
+        # La película 999 no está en MovieLens.
+        with self.assertRaisesRegex(
+            ValueError,
+            "referencias a películas inexistentes",
+        ):
+            validate_movielens_tag_references(
+                movies=movies,
+                tags=tags_invalidos,
+            )
+
     
     def test_watchmode_sin_plataformas_conserva_columnas(self):
-
-        from src.transformation.bronze_to_silver import (
-            transform_watchmode_sources,
-            clean_watchmode_sources,
-            transform_watchmode_status,
-        )
 
         registros = [
             {"tmdb_id": 550, "sources": []},
@@ -87,15 +187,6 @@ class BronzeToSilverTests(unittest.TestCase):
 
     
     def test_watchmode_parquet_vacio_conserva_esquema(self):
-
-        import pandas as pd
-        from pathlib import Path
-        from tempfile import TemporaryDirectory
-
-        from src.transformation.bronze_to_silver import (
-            transform_watchmode_sources,
-            clean_watchmode_sources,
-        )
 
         # Dos películas consultadas sin plataformas.
         registros = [
@@ -170,10 +261,6 @@ class BronzeToSilverTests(unittest.TestCase):
     
     def test_tmdb_rechaza_dataset_vacio(self):
 
-        from src.transformation.bronze_to_silver import (
-            transform_tmdb_movies,
-            clean_tmdb_movies,
-        )
 
         # Simular que TMDb no entrega películas.
         registros = []
@@ -191,11 +278,6 @@ class BronzeToSilverTests(unittest.TestCase):
 
     
     def test_tmdb_rechaza_todos_ids_invalidos(self):
-
-        from src.transformation.bronze_to_silver import (
-            transform_tmdb_movies,
-            clean_tmdb_movies,
-        )
 
         # Existen registros, pero ninguno
         # tiene un identificador TMDb válido.
@@ -228,16 +310,6 @@ class BronzeToSilverTests(unittest.TestCase):
 
     
     def test_ratings_bloquea_particiones_obsoletas(self):
-
-        import pandas as pd
-
-        from pathlib import Path
-        from tempfile import TemporaryDirectory
-        from unittest.mock import patch
-
-        from src.transformation.bronze_to_silver import (
-            save_ratings_partitioned,
-        )
 
         with TemporaryDirectory() as temporal:
 
@@ -289,19 +361,6 @@ class BronzeToSilverTests(unittest.TestCase):
 
     
     def test_ratings_utiliza_directorio_por_ejecucion(self):
-
-        import pandas as pd
-
-        from pathlib import Path
-        from tempfile import TemporaryDirectory
-
-        from src.utils.silver_runs import (
-            build_silver_run_directories,
-        )
-
-        from src.transformation.bronze_to_silver import (
-            save_ratings_partitioned,
-        )
 
         run_id = (
             "12345678-1234-4234-8234-123456789abc"
@@ -362,19 +421,6 @@ class BronzeToSilverTests(unittest.TestCase):
 
     
     def test_movielens_guarda_todos_archivos_por_ejecucion(self):
-
-        import pandas as pd
-
-        from pathlib import Path
-        from tempfile import TemporaryDirectory
-
-        from src.utils.silver_runs import (
-            build_silver_run_directories,
-        )
-
-        from src.transformation.bronze_to_silver import (
-            save_movielens_silver,
-        )
 
         run_id = (
             "12345678-1234-4234-8234-123456789abc"
@@ -469,20 +515,6 @@ class BronzeToSilverTests(unittest.TestCase):
     
     def test_metadata_movielens_guarda_por_ejecucion(self):
 
-        import json
-        import pandas as pd
-
-        from pathlib import Path
-        from tempfile import TemporaryDirectory
-
-        from src.utils.silver_runs import (
-            build_silver_run_directories,
-        )
-
-        from src.transformation.bronze_to_silver import (
-            save_movielens_silver_metadata,
-        )
-
         run_id = (
             "12345678-1234-4234-8234-123456789abc"
         )
@@ -564,19 +596,6 @@ class BronzeToSilverTests(unittest.TestCase):
 
     
     def test_pipeline_movielens_usa_misma_carpeta_ejecucion(self):
-
-        import pandas as pd
-        from pathlib import Path
-        from tempfile import TemporaryDirectory
-        from unittest.mock import patch
-
-        from src.utils.silver_runs import (
-            build_silver_run_directories,
-        )
-
-        from src.transformation.bronze_to_silver import (
-            run_movielens_bronze_to_silver,
-        )
 
         bronze_simulado = {
             "movies": pd.DataFrame({
@@ -673,19 +692,6 @@ class BronzeToSilverTests(unittest.TestCase):
     
     def test_tmdb_guarda_parquet_por_ejecucion(self):
 
-        import pandas as pd
-
-        from pathlib import Path
-        from tempfile import TemporaryDirectory
-
-        from src.utils.silver_runs import (
-            build_silver_run_directories,
-        )
-
-        from src.transformation.bronze_to_silver import (
-            save_tmdb_silver,
-        )
-
         run_id = (
             "12345678-1234-4234-8234-123456789abc"
         )
@@ -755,20 +761,6 @@ class BronzeToSilverTests(unittest.TestCase):
     
     def test_tmdb_metadata_guarda_por_ejecucion(self):
 
-        import json
-        import pandas as pd
-
-        from pathlib import Path
-        from tempfile import TemporaryDirectory
-
-        from src.utils.silver_runs import (
-            build_silver_run_directories,
-        )
-
-        from src.transformation.bronze_to_silver import (
-            save_tmdb_silver_metadata,
-        )
-
         run_id = (
             "12345678-1234-4234-8234-123456789abc"
         )
@@ -836,18 +828,6 @@ class BronzeToSilverTests(unittest.TestCase):
 
     
     def test_pipeline_tmdb_utiliza_misma_carpeta_ejecucion(self):
-
-        from pathlib import Path
-        from tempfile import TemporaryDirectory
-        from unittest.mock import patch
-
-        from src.utils.silver_runs import (
-            build_silver_run_directories,
-        )
-
-        from src.transformation.bronze_to_silver import (
-            run_tmdb_bronze_to_silver,
-        )
 
         run_id = (
             "12345678-1234-4234-8234-123456789abc"
@@ -934,19 +914,6 @@ class BronzeToSilverTests(unittest.TestCase):
 
     
     def test_watchmode_guarda_parquet_por_ejecucion(self):
-
-        import pandas as pd
-
-        from pathlib import Path
-        from tempfile import TemporaryDirectory
-
-        from src.utils.silver_runs import (
-            build_silver_run_directories,
-        )
-
-        from src.transformation.bronze_to_silver import (
-            save_watchmode_silver,
-        )
 
         run_id = (
             "12345678-1234-4234-8234-123456789abc"
@@ -1043,18 +1010,6 @@ class BronzeToSilverTests(unittest.TestCase):
     
     
     def test_pipeline_watchmode_usa_misma_carpeta_ejecucion(self):
-
-        from pathlib import Path
-        from tempfile import TemporaryDirectory
-        from unittest.mock import patch
-
-        from src.utils.silver_runs import (
-            build_silver_run_directories,
-        )
-
-        from src.transformation.bronze_to_silver import (
-            run_watchmode_bronze_to_silver,
-        )
 
         run_id = (
             "12345678-1234-4234-8234-123456789abc"
@@ -1160,12 +1115,6 @@ class BronzeToSilverTests(unittest.TestCase):
     
     def test_movielens_rechaza_ratings_de_peliculas_inexistentes(self):
 
-        import pandas as pd
-
-        from src.transformation.bronze_to_silver import (
-            validate_movielens_rating_references,
-        )
-
         movies = pd.DataFrame({
             "movie_id": [1, 2, 3],
             "title": [
@@ -1204,21 +1153,78 @@ class BronzeToSilverTests(unittest.TestCase):
             )
 
     
+    def test_pipeline_movielens_bloquea_ratings_huerfanos(self):
+
+        # El catálogo contiene las películas 1 y 2.
+        # El rating apunta a la película 999.
+        bronze = {
+            "movies": pd.DataFrame({
+                "movieId": [1, 2],
+                "title": [
+                    "Pelicula A",
+                    "Pelicula B",
+                ],
+                "genres": [
+                    "Drama",
+                    "Comedy",
+                ],
+            }),
+            "ratings": pd.DataFrame({
+                "userId": [10],
+                "movieId": [999],
+                "rating": [4.5],
+                "timestamp": [1700000000],
+            }),
+            "tags": pd.DataFrame({
+                "userId": [10],
+                "movieId": [1],
+                "tag": ["Drama"],
+                "timestamp": [1700000000],
+            }),
+            "links": pd.DataFrame({
+                "movieId": [1, 2],
+                "imdbId": ["0000550", "0000600"],
+                "tmdbId": [550, 600],
+            }),
+        }
+
+        with TemporaryDirectory() as temporal:
+
+            destino = Path(temporal) / "movielens"
+
+            with (
+                patch(
+                    "src.transformation.bronze_to_silver."
+                    "load_movielens_bronze",
+                    return_value=bronze,
+                ),
+                patch(
+                    "src.transformation.bronze_to_silver."
+                    "save_movielens_silver",
+                ) as mock_parquet,
+                patch(
+                    "src.transformation.bronze_to_silver."
+                    "save_movielens_silver_metadata",
+                ) as mock_metadata,
+            ):
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "referencias a películas inexistentes",
+                ):
+                    run_movielens_bronze_to_silver(
+                        output_dir=destino,
+                    )
+
+            # No debe intentar escribir ningún dataset.
+            mock_parquet.assert_not_called()
+            mock_metadata.assert_not_called()
+
+            # Tampoco debe crear la carpeta de salida.
+            self.assertFalse(destino.exists())
+
+    
     def test_watchmode_metadata_guarda_por_ejecucion(self):
-
-        import json
-        import pandas as pd
-
-        from pathlib import Path
-        from tempfile import TemporaryDirectory
-
-        from src.utils.silver_runs import (
-            build_silver_run_directories,
-        )
-
-        from src.transformation.bronze_to_silver import (
-            save_watchmode_silver_metadata,
-        )
 
         run_id = (
             "12345678-1234-4234-8234-123456789abc"
@@ -1298,11 +1304,6 @@ class BronzeToSilverTests(unittest.TestCase):
     
     def test_tmdb_rechaza_identificadores_duplicados(self):
 
-        from src.transformation.bronze_to_silver import (
-            transform_tmdb_movies,
-            clean_tmdb_movies,
-        )
-
         # Dos registros diferentes con el mismo ID.
         registros = [
             {
@@ -1377,10 +1378,6 @@ class BronzeToSilverTests(unittest.TestCase):
 
     
     def test_links_rechaza_identificadores_conflictivos(self):
-
-        from src.transformation.bronze_to_silver import (
-            transform_links,
-        )
 
         links = pd.DataFrame({
             "movieId": [1, 1, 2],
