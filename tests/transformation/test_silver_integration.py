@@ -735,6 +735,67 @@ class SilverIntegrationTests(unittest.TestCase):
             )
 
 
+    def test_integrated_rechaza_movie_id_duplicados_antes_guardar(self):
+
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from unittest.mock import patch
+
+        from src.transformation.silver_integration import (
+            run_silver_integration,
+        )
+
+        peliculas_duplicadas = pd.DataFrame({
+            "movie_id": [1, 2, 2],
+            "canonical_title": [
+                "Pelicula A",
+                "Pelicula B",
+                "Pelicula C",
+            ],
+        })
+
+        with TemporaryDirectory() as temporal:
+
+            destino = Path(temporal) / "integrated"
+
+            with (
+                patch(
+                    "src.transformation.silver_integration."
+                    "load_silver_datasets",
+                    return_value={},
+                ),
+                patch(
+                    "src.transformation.silver_integration."
+                    "build_integrated_movies",
+                    return_value=peliculas_duplicadas,
+                ),
+                patch(
+                    "src.transformation.silver_integration."
+                    "save_integrated_movies",
+                ) as mock_parquet,
+                patch(
+                    "src.transformation.silver_integration."
+                    "save_integrated_metadata",
+                ) as mock_metadata,
+            ):
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "movie_id duplicados",
+                ):
+                    run_silver_integration(
+                        output_dir=destino,
+                    )
+
+            # No debe guardar resultados inválidos.
+            mock_parquet.assert_not_called()
+            mock_metadata.assert_not_called()
+
+            self.assertFalse(
+                destino.exists()
+            )
+
+    
     def test_integrated_lee_fuentes_de_misma_ejecucion(self):
 
         from pathlib import Path

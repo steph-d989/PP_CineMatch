@@ -286,9 +286,34 @@ def save_integrated_movies(
     return ruta
 
 
+def validate_integrated_catalog(
+    df: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Valida las claves del catálogo Integrated.
+
+    Una película de MovieLens debe aparecer
+    una sola vez y tener un movie_id válido.
+    """
+
+    if "movie_id" not in df.columns:
+        raise ValueError(
+            "Integrated no contiene la columna movie_id."
+        )
+
+    if df["movie_id"].isna().any():
+        raise ValueError(
+            "Integrated contiene movie_id nulos."
+        )
+
+    if df["movie_id"].duplicated().any():
+        raise ValueError(
+            "Integrated contiene movie_id duplicados."
+        )
+
+    return df
+
 ### FUNCION QIE GUARDA LOS METADATOS
-
-
 def save_integrated_metadata(
     df: pd.DataFrame,
     output_dir: Path | None = None,
@@ -383,6 +408,11 @@ def run_silver_integration(
         datasets
     )
 
+    
+    # Validar las claves antes de guardar.
+    df = validate_integrated_catalog(df)
+
+    
     ruta = save_integrated_movies(
         df=df,
         output_dir=output_dir,
