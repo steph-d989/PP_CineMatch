@@ -1,4 +1,7 @@
 
+import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 import pandas as pd
 
@@ -6,8 +9,14 @@ from src.models.baseline import (
     build_baseline_scores,
     recommend_baseline_top_n,
     build_training_movie_metrics,
+    recommend_baseline_from_gold,
 )
 
+from src.utils.gold_runs import (
+    build_gold_run_directories,
+    build_gold_manifest,
+    save_gold_manifest,
+)
 
 class BaselineTests(unittest.TestCase):
 
@@ -209,6 +218,163 @@ class BaselineTests(unittest.TestCase):
             build_training_movie_metrics(
                 train_ratings.iloc[0:0]
             )
+        
+    def test_baseline_lee_gold_versionado(self):
 
+        run_id = (
+            "12345678-1234-4234-8234-123456789abc"
+        )
+
+        with TemporaryDirectory() as temporal:
+
+            gold_dirs = build_gold_run_directories(
+                gold_root=Path(temporal) / "gold",
+                run_id=run_id,
+            )
+
+            dim_movie_path = (
+                gold_dirs["dimensions"]
+                / "dim_movie.parquet"
+            )
+
+            metrics_path = (
+                gold_dirs["metrics"]
+                / "movie_metrics.parquet"
+            )
+
+            dim_movie_path.parent.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+
+            metrics_path.parent.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+
+            pd.DataFrame({
+                "movie_id": [1, 2],
+                "title": ["Pelicula A", "Pelicula B"],
+            }).to_parquet(
+                dim_movie_path,
+                index=False,
+            )
+
+            pd.DataFrame({
+                "movie_id": [1, 2],
+                "rating_count": [100, 10],
+                "rating_mean": [4.0, 5.0],
+            }).to_parquet(
+                metrics_path,
+                index=False,
+            )
+
+            # Crear el resto de datasets obligatorios
+            # para un manifiesto Gold completo.
+            rutas = {
+                "dim_movie": dim_movie_path,
+                "movie_metrics": metrics_path,
+            }
+
+            adicionales = {
+                "dim_user": (
+                    gold_dirs["dimensions"] / "dim_user.parquet"
+                ),
+                "dim_platform": (
+                    gold_dirs["dimensions"] / "dim_platform.parquet"
+                ),
+                "dim_date": (
+                    gold_dirs["dimensions"] / "dim_date.parquet"
+                ),
+                "fact_rating": [
+                    gold_dirs["facts"]
+                    / "fact_rating"
+                    / "part_000.parquet"
+                ],
+                "fact_availability": (
+                    gold_dirs["facts"]
+                    / "fact_availability.parquet"
+                ),
+                "user_metrics": (
+                    gold_dirs["metrics"] / "user_metrics.parquet"
+                ),
+                "availability_unlinked": (
+                    gold_dirs["quality"]
+                    / "availability_unlinked.parquet"
+                ),
+            }
+
+            for referencia in adicionales.values():
+
+                archivos = (
+                    referencia
+                    if isinstance(referencia, list)
+                    else [referencia]
+                )
+
+                for ruta in archivos:
+                    ruta.parent.mkdir(
+                        parents=True,
+                        exist_ok=True,
+                    )
+
+                    pd.DataFrame({
+                        "id": [1],
+                    }).to_parquet(
+                        ruta,
+                        index=False,
+                    )
+
+            rutas.update(adicionales)
+
+            metadata_path = (
+                gold_dirs["metrics"] / "_metadata.json"
+            )
+
+            metadata_path.write_text(
+                json.dumps({"capa": "gold"}),
+                encoding="utf-8",
+            )
+
+            manifest = build_gold_manifest(
+                gold_dirs=gold_dirs,
+                rutas=rutas,
+                metadata_path=metadata_path,
+            )
+
+            save_gold_manifest(
+                gold_dirs=gold_dirs,
+                manifest=manifest,
+            )
+
+            # Ranking desde los archivos físicos.
+            resultado = recommend_baseline_from_gold(
+                gold_dirs=gold_dirs,
+                n=2,
+            )
+
+            self.assertEqual(len(resultado), 2)
+
+            self.assertEqual(
+                set(resultado["movie_id"]),
+                {1, 2},
+            )
+
+            self.assertIn(
+                "weighted_score",
+                resultado.columns,
+            )
+
+            # Corromper una métrica después
+            # de guardar el manifiesto.
+            metrics_path.write_bytes(b"alterado")
+
+            with self.assertRaises(ValueError):
+                recommend_baseline_from_gold(
+                    gold_dirs=gold_dirs,
+                    n=2,
+                )
+
+    
 if __name__ == "__main__":
     unittest.main()

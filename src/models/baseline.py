@@ -9,7 +9,13 @@ y no realiza conexiones externas.
 """
 
 import pandas as pd
+import json
+from pathlib import Path
 
+from src.utils.gold_runs import (
+    validate_gold_run_directories,
+    verify_gold_manifest,
+)
 
 def build_baseline_scores(
     dim_movie: pd.DataFrame,
@@ -314,3 +320,97 @@ def build_training_movie_metrics(
     )
 
     return metricas
+
+def recommend_baseline_from_gold(
+    gold_dirs: dict[str, Path],
+    n: int = 10,
+    min_ratings: int = 1,
+    quantile: float = 0.90,
+) -> pd.DataFrame:
+    """
+    Genera recomendaciones Baseline desde
+    una ejecución Gold Analytics versionada.
+
+    Verifica el manifiesto antes de leer datos.
+    No entrena modelos ni publica resultados.
+
+    IMPORTANTE:
+    Esta función es para rankings generales.
+    Para evaluación ML debemos calcular las
+    métricas exclusivamente desde train.
+    """
+
+    validate_gold_run_directories(gold_dirs)
+
+    raiz = Path(gold_dirs["root"]).resolve()
+    manifest_path = raiz / "_manifest.json"
+
+    if not manifest_path.is_file():
+        raise FileNotFoundError(
+            "Baseline requiere _manifest.json."
+        )
+
+    try:
+        with manifest_path.open(
+            "r",
+            encoding="utf-8",
+        ) as archivo:
+            manifest = json.load(archivo)
+
+    except (
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+    ) as exc:
+        raise ValueError(
+            "Baseline encontró un manifiesto inválido."
+        ) from exc
+
+    if not isinstance(manifest, dict):
+        raise ValueError(
+            "Baseline requiere un manifiesto JSON válido."
+        )
+
+    # Comprobar run_id, tamaño y SHA-256.
+    verify_gold_manifest(
+        gold_dirs=gold_dirs,
+        manifest=manifest,
+    )
+
+    # Comprobar que los archivos consumidos
+    # estén declarados en el manifiesto.
+    registros = {
+        (entrada["dataset"], entrada["path"])
+        for entrada in manifest["archivos"]
+    }
+
+    requeridos = {
+        ("dim_movie", "dimensions/dim_movie.parquet"),
+        ("movie_metrics", "metrics/movie_metrics.parquet"),
+    }
+
+    if not requeridos.issubset(registros):
+        raise ValueError(
+            "Baseline requiere dim_movie y movie_metrics "
+            "registrados en el manifiesto."
+        )
+
+    dim_movie = pd.read_parquet(
+        gold_dirs["dimensions"] / "dim_movie.parquet"
+    )
+
+    movie_metrics = pd.read_parquet(
+        gold_dirs["metrics"] / "movie_metrics.parquet"
+    )
+
+    scores = build_baseline_scores(
+        dim_movie=dim_movie,
+        movie_metrics=movie_metrics,
+        quantile=quantile,
+    )
+
+    return recommend_baseline_top_n(
+        baseline_scores=scores,
+        n=n,
+        min_ratings=min_ratings,
+    )
