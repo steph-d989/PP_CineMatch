@@ -44,3 +44,6 @@ Thumbs.db
 
 # Mantener archivos .gitkeep
 !.gitkeep
+
+# Artefactos experimentales de modelos
+/data/experiments/movielens_32m/models/
