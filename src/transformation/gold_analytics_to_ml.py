@@ -19,10 +19,28 @@ def load_gold_analytics() -> dict[str, pd.DataFrame]:
         / "dim_movie.parquet"
     )
 
-    fact_rating_path = (
-        GOLD_FACTS_DIR
-        / "fact_rating.parquet"
-    )
+
+    # Priorizar el dataset oficial particionado.
+    ratings_directory = GOLD_FACTS_DIR / "fact_rating"
+
+    ratings_file = GOLD_FACTS_DIR / "fact_rating.parquet"
+
+    if (
+        ratings_directory.is_dir()
+        and any(ratings_directory.glob("part_*.parquet"))
+    ):
+        fact_rating_path = ratings_directory
+
+    elif ratings_file.is_file():
+        # Compatibilidad temporal con versiones antiguas.
+        fact_rating_path = ratings_file
+
+    else:
+        raise FileNotFoundError(
+            "No se encontró fact_rating particionado "
+            "ni fact_rating.parquet."
+        )
+
 
     if not dim_movie_path.exists():
         raise FileNotFoundError(
@@ -262,16 +280,6 @@ def run_gold_analytics_to_ml():
             collaborative_interactions,
             GOLD_ML_COLLABORATIVE_DIR,
             "collaborative_interactions",
-        )
-    )
-
-    rutas[
-        "collaborative_interactions"
-    ] = (
-        save_ml_dataset(
-            collaborative_interactions,
-            GOLD_ML_COLLABORATIVE_DIR,
-            "collaborative_interactions.parquet",
         )
     )
 

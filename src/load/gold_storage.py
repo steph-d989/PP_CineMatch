@@ -1,13 +1,13 @@
+from uuid import UUID
+
 from datetime import date
 from pathlib import Path
-
 from src.utils.paths import GOLD_DIR
 from src.utils.supabase_client import (
     upload_file_to_storage,
 )
 
 ### FUNCION QUE SUBE LOS AARCHIVOS A GOLD CONSERVANDO LA ESTRUCTURA
-
 def upload_gold_directory(
     local_dir: Path,
     source_root: Path,
@@ -92,8 +92,33 @@ def upload_gold_directory(
 
     return resultados
 
-### FUNCION QUE PUBLICA LA CAPA GOLD LOCAL A UPABASE STORAGE
+### FUNCION QUE CONTRUYE UNA RUTA REMOTA VERSIONADA PARA GOLD
+def build_gold_versioned_path(
+    relative_path: str,
+    run_id: str,
+) -> str:
 
+    # Validar y normalizar el identificador.
+    version = str(UUID(run_id))
+
+    # Normalizar separadores para Supabase Storage.
+    ruta = relative_path.replace("\\", "/")
+    partes = ruta.split("/")
+
+    # Evitar rutas absolutas, vacías o con traversal.
+    if (
+        not ruta
+        or ruta.startswith("/")
+        or any(parte in ("", ".", "..") for parte in partes)
+        or ":" in partes[0]
+    ):
+        raise ValueError(
+            "La ruta relativa Gold no es válida."
+        )
+
+    return f"run_id={version}/{ruta}"
+
+### FUNCION QUE PUBLICA LA CAPA GOLD LOCAL A UPABASE STORAGE
 def upload_gold_to_supabase() -> dict:
 
     print("=" * 60)

@@ -17,9 +17,32 @@ dim_date = pd.read_parquet(
     GOLD_DIMENSIONS_DIR / "dim_date.parquet"
 )
 
+
+# Priorizar el almacenamiento particionado de ratings.
+ratings_directory = GOLD_FACTS_DIR / "fact_rating"
+
+ratings_file = GOLD_FACTS_DIR / "fact_rating.parquet"
+
+if (
+    ratings_directory.is_dir()
+    and any(ratings_directory.glob("part_*.parquet"))
+):
+    fact_rating_path = ratings_directory
+
+elif ratings_file.is_file():
+    # Compatibilidad temporal con Gold antiguo.
+    fact_rating_path = ratings_file
+
+else:
+    raise FileNotFoundError(
+        "No se encontró fact_rating particionado "
+        "ni fact_rating.parquet."
+    )
+
 fact_rating = pd.read_parquet(
-    GOLD_FACTS_DIR / "fact_rating.parquet"
+    fact_rating_path
 )
+
 
 fact_availability = pd.read_parquet(
     GOLD_FACTS_DIR / "fact_availability.parquet"
