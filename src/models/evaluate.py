@@ -488,3 +488,156 @@ def evaluate_content_hit_rate(
         "usuarios_excluidos": excluidos,
         "aciertos": aciertos,
     }
+
+
+def evaluate_collaborative_hit_rate(
+    train: pd.DataFrame,
+    test: pd.DataFrame,
+    fitted_model: dict,
+    k: int = 10,
+    relevance_threshold: float = 4.0,
+) -> dict:
+    """
+    Evalúa el modelo colaborativo mediante Hit Rate@K.
+
+    fitted_model debe haber sido entrenado
+    exclusivamente con train.
+
+    Excluye del ranking las películas vistas en train.
+    Reporta por separado usuarios no evaluables.
+    """
+
+    from src.models.collaborative import (
+        recommend_collaborative_top_n,
+    )
+
+    if isinstance(k, bool) or not isinstance(k, int) or k <= 0:
+        raise ValueError(
+            "k debe ser un entero positivo."
+        )
+
+    if not 0.5 <= relevance_threshold <= 5.0:
+        raise ValueError(
+            "relevance_threshold debe estar entre 0.5 y 5.0."
+        )
+
+    requeridas = {"user_id", "movie_id", "rating"}
+
+    for nombre, datos in (("Train", train), ("Test", test)):
+
+        faltantes = requeridas - set(datos.columns)
+
+        if faltantes:
+            raise ValueError(
+                f"{nombre} contiene columnas faltantes: "
+                + ", ".join(sorted(faltantes))
+            )
+
+        if datos[list(requeridas)].isna().any().any():
+            raise ValueError(
+                f"{nombre} contiene valores nulos."
+            )
+
+        if datos.duplicated(
+            subset=["user_id", "movie_id"]
+        ).any():
+            raise ValueError(
+                f"{nombre} contiene interacciones duplicadas."
+            )
+
+    pares_train = set(
+        zip(train["user_id"], train["movie_id"])
+    )
+
+    pares_test = set(
+        zip(test["user_id"], test["movie_id"])
+    )
+
+    if not pares_train.isdisjoint(pares_test):
+        raise ValueError(
+            "Existe solapamiento usuario-película "
+            "entre Train y Test."
+        )
+
+    if not {
+        "user_to_idx",
+        "movie_to_idx",
+        "movie_ids",
+    }.issubset(fitted_model):
+        raise ValueError(
+            "El modelo colaborativo está incompleto."
+        )
+
+    usuarios_modelo = set(
+        fitted_model["user_to_idx"]
+    )
+
+    peliculas_modelo = set(
+        fitted_model["movie_to_idx"]
+    )
+
+    relevantes = test.loc[
+        test["rating"] >= relevance_threshold
+    ]
+
+    usuarios_relevantes = int(
+        relevantes["user_id"].nunique()
+    )
+
+    aciertos = 0
+    evaluables = 0
+    excluidos = 0
+
+    for user_id, grupo in relevantes.groupby("user_id"):
+
+        objetivos = set(
+            grupo["movie_id"].tolist()
+        )
+
+        # Para ser evaluable necesitamos un usuario
+        # y al menos un objetivo conocidos por el modelo.
+        if (
+            user_id not in usuarios_modelo
+            or not objetivos.intersection(peliculas_modelo)
+        ):
+            excluidos += 1
+            continue
+
+        recomendaciones = recommend_collaborative_top_n(
+            fitted_model=fitted_model,
+            user_id=user_id,
+            train_interactions=train,
+            n=k,
+        )
+
+        peliculas_recomendadas = set(
+            recomendaciones["movie_id"].tolist()
+        )
+
+        evaluables += 1
+
+        if objetivos.intersection(peliculas_recomendadas):
+            aciertos += 1
+
+    return {
+        "metrica": f"Hit Rate@{k}",
+        "hit_rate": (
+            aciertos / evaluables
+            if evaluables > 0
+            else None
+        ),
+        "hit_rate_global": (
+            aciertos / usuarios_relevantes
+            if usuarios_relevantes > 0
+            else None
+        ),
+        "cobertura_evaluacion": (
+            evaluables / usuarios_relevantes
+            if usuarios_relevantes > 0
+            else None
+        ),
+        "usuarios_relevantes": usuarios_relevantes,
+        "usuarios_evaluables": evaluables,
+        "usuarios_excluidos": excluidos,
+        "aciertos": aciertos,
+    }

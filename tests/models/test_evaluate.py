@@ -1,5 +1,6 @@
 import unittest
 import pandas as pd
+import numpy as np
 
 from src.models.evaluate import *
 
@@ -9,6 +10,117 @@ from src.models.content_based import (
 
 
 class EvaluateTests(unittest.TestCase):
+
+
+    def test_collaborative_hit_rate_y_cobertura(self):
+
+        # Datos de entrenamiento.
+        train = pd.DataFrame({
+            "user_id": [10, 20, 30],
+            "movie_id": [1, 2, 3],
+            "rating": [5.0, 4.5, 4.0],
+        })
+
+        # Interacciones reservadas para prueba.
+        test = pd.DataFrame({
+            "user_id": [10, 20, 40],
+            "movie_id": [2, 1, 3],
+            "rating": [5.0, 5.0, 4.5],
+        })
+
+        # Factores conocidos para verificar el
+        # ranking sin depender del ajuste de SVD.
+        modelo = {
+            "user_factors": np.array([
+                [1.0, 0.0],
+                [0.0, 1.0],
+                [0.5, 0.5],
+            ]),
+            "movie_components": np.array([
+                [0.2, 0.9, 0.1],
+                [0.8, 0.2, 0.1],
+            ]),
+            "user_to_idx": {
+                10: 0,
+                20: 1,
+                30: 2,
+            },
+            "movie_to_idx": {
+                1: 0,
+                2: 1,
+                3: 2,
+            },
+            "movie_ids": [1, 2, 3],
+        }
+
+        resultado = evaluate_collaborative_hit_rate(
+            train=train,
+            test=test,
+            fitted_model=modelo,
+            k=1,
+        )
+
+        self.assertEqual(
+            resultado["metrica"],
+            "Hit Rate@1",
+        )
+
+        # Tres usuarios tienen ratings relevantes.
+        self.assertEqual(
+            resultado["usuarios_relevantes"],
+            3,
+        )
+
+        # El usuario 40 no existe en el modelo.
+        self.assertEqual(
+            resultado["usuarios_excluidos"],
+            1,
+        )
+
+        self.assertEqual(
+            resultado["usuarios_evaluables"],
+            2,
+        )
+
+        # Usuario 10 -> película 2.
+        # Usuario 20 -> película 1.
+        self.assertEqual(
+            resultado["aciertos"],
+            2,
+        )
+
+        self.assertAlmostEqual(
+            resultado["hit_rate"],
+            1.0,
+        )
+
+        self.assertAlmostEqual(
+            resultado["hit_rate_global"],
+            2 / 3,
+        )
+
+        self.assertAlmostEqual(
+            resultado["cobertura_evaluacion"],
+            2 / 3,
+        )
+
+        # Rechazar interacciones presentes
+        # simultáneamente en Train y Test.
+        test_solapado = pd.DataFrame({
+            "user_id": [10],
+            "movie_id": [1],
+            "rating": [5.0],
+        })
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "solapamiento usuario-película",
+        ):
+            evaluate_collaborative_hit_rate(
+                train=train,
+                test=test_solapado,
+                fitted_model=modelo,
+            )
 
     def test_division_temporal_por_usuario(self):
 
