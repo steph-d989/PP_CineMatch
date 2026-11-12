@@ -609,6 +609,102 @@ class MedallionLocalTests(unittest.TestCase):
                 ),
                 0,
             )
+            
+            # ---------------------------------------
+            # 13. ATRIBUTOS SEMÁNTICOS PARA GOLD ML
+            # ---------------------------------------
+
+            from src.transformation.gold_analytics_to_ml import (
+                build_content_based_features,
+            )
+
+            # Utilizar la dimensión real que produjo
+            # el pipeline Bronze -> Silver -> Gold.
+            atributos_requeridos = {
+                "movie_id",
+                "tmdb_id",
+                "title",
+                "genres",
+                "tmdb_genres",
+                "overview",
+                "director",
+                "actors",
+                "keywords",
+            }
+
+            self.assertTrue(
+                atributos_requeridos.issubset(
+                    dim_movie.columns
+                ),
+                msg=(
+                    "Gold perdió atributos semánticos "
+                    "durante la integración Medallion."
+                ),
+            )
+
+            # Comprobar que la película TMDb 550
+            # conserva información enriquecida.
+            pelicula = (
+                dim_movie
+                .set_index("tmdb_id")
+                .loc[550]
+            )
+
+            self.assertEqual(
+                pelicula["overview"],
+                "A psychological drama.",
+            )
+
+            self.assertEqual(
+                pelicula["director"],
+                "Director A",
+            )
+
+            self.assertIn(
+                "identity",
+                list(pelicula["keywords"]),
+            )
+
+            # Ejecutar la transformación real
+            # Gold Analytics -> Gold ML.
+            content_features = (
+                build_content_based_features(
+                    dim_movie
+                )
+            )
+
+            self.assertEqual(
+                len(content_features),
+                2,
+            )
+
+            self.assertTrue(
+                atributos_requeridos.issubset(
+                    content_features.columns
+                )
+            )
+
+            pelicula_ml = (
+                content_features
+                .set_index("movie_id")
+                .loc[1]
+            )
+
+            self.assertEqual(
+                pelicula_ml["director"],
+                "Director A",
+            )
+
+            self.assertIn(
+                "Drama",
+                list(pelicula_ml["tmdb_genres"]),
+            )
+
+            self.assertIn(
+                "identity",
+                list(pelicula_ml["keywords"]),
+            )
+
 
 
 

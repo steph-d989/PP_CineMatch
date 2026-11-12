@@ -1,5 +1,5 @@
 from pathlib import Path
-
+import json
 import pandas as pd
 
 from src.utils.paths import (
@@ -10,46 +10,200 @@ from src.utils.paths import (
     GOLD_ML_HYBRID_DIR,
 )
 
-### FUNCION QUE CARGA LOS DATASETS DE GOLD ANALITICS
+from src.utils.gold_runs import (
+    validate_gold_run_directories,
+    verify_gold_manifest,
+    GOLD_REQUIRED_DATASETS,
+)
 
-def load_gold_analytics() -> dict[str, pd.DataFrame]:
+### FUNCION QUE CARGA LOS DATASETS DE GOLD ANALITICS
+def load_gold_analytics(
+    gold_dirs: dict[str, Path] | None = None,
+) -> dict[str, pd.DataFrame]:
+    """
+    Carga los datasets Gold Analytics necesarios
+    para construir los modelos de CineMatch.
+
+    Si se proporcionan gold_dirs, utiliza
+    exclusivamente esa ejecución versionada.
+
+    Mantiene temporalmente la compatibilidad
+    con los directorios antiguos.
+    """
+
+    
+    if gold_dirs is not None:
+
+        # 1. Validar los directorios del run_id.
+        validate_gold_run_directories(
+            gold_dirs=gold_dirs,
+        )
+
+        raiz = Path(gold_dirs["root"]).resolve()
+
+        # 2. Localizar el manifiesto Gold.
+        manifest_path = raiz / "_manifest.json"
+
+        if not manifest_path.is_file():
+            raise FileNotFoundError(
+                "Gold ML requiere _manifest.json "
+                "en la ejecución seleccionada."
+            )
+
+        # 3. Leer el manifiesto.
+        try:
+            with manifest_path.open(
+                "r",
+                encoding="utf-8",
+            ) as archivo:
+                manifest = json.load(archivo)
+
+        except (
+            OSError,
+            UnicodeError,
+            json.JSONDecodeError,
+        ) as exc:
+            raise ValueError(
+                "Gold ML encontró un manifiesto inválido."
+            ) from exc
+
+        if not isinstance(manifest, dict):
+            raise ValueError(
+                "Gold ML requiere un manifiesto JSON tipo objeto."
+            )
+
+        # 4. Verificar run_id, tamaños y SHA-256.
+        verify_gold_manifest(
+            gold_dirs=gold_dirs,
+            manifest=manifest,
+        )
+
+        # 5. Comprobar los datasets obligatorios.
+        entradas = manifest["archivos"]
+
+        datasets = {
+            entrada["dataset"]
+            for entrada in entradas
+        }
+
+        faltantes = GOLD_REQUIRED_DATASETS - datasets
+
+        if faltantes:
+            raise ValueError(
+                "Gold ML encontró un manifiesto "
+                "con datasets faltantes: "
+                + ", ".join(sorted(faltantes))
+            )
+
+        # 6. Verificar que dim_movie esté registrada.
+        rutas_manifest = {
+            entrada["path"]
+            for entrada in entradas
+        }
+
+        if (
+            "dimensions/dim_movie.parquet"
+            not in rutas_manifest
+        ):
+            raise ValueError(
+                "Gold ML: dim_movie no está "
+                "registrado en el manifiesto."
+            )
+
+        # 7. Comprobar las particiones de ratings.
+        ratings_dir = (
+            raiz / "facts" / "fact_rating"
+        )
+
+        particiones = {
+            ruta.relative_to(raiz).as_posix()
+            for ruta in ratings_dir.glob(
+                "part_*.parquet"
+            )
+        }
+
+        registradas = {
+            entrada["path"]
+            for entrada in entradas
+            if entrada["dataset"] == "fact_rating"
+        }
+
+        if not particiones or particiones != registradas:
+            raise ValueError(
+                "Gold ML: particiones fact_rating "
+                "inconsistentes con el manifiesto."
+            )
+
+        # 8. Seleccionar los directorios versionados.
+        dimensions_dir = Path(
+            gold_dirs["dimensions"]
+        )
+
+        facts_dir = Path(
+            gold_dirs["facts"]
+        )
+
+    else:
+
+        # Compatibilidad con versiones anteriores.
+        dimensions_dir = GOLD_DIMENSIONS_DIR
+        facts_dir = GOLD_FACTS_DIR
 
     dim_movie_path = (
-        GOLD_DIMENSIONS_DIR
-        / "dim_movie.parquet"
+        dimensions_dir / "dim_movie.parquet"
     )
 
+    ratings_directory = (
+        facts_dir / "fact_rating"
+    )
 
-    # Priorizar el dataset oficial particionado.
-    ratings_directory = GOLD_FACTS_DIR / "fact_rating"
+    ratings_file = (
+        facts_dir / "fact_rating.parquet"
+    )
 
-    ratings_file = GOLD_FACTS_DIR / "fact_rating.parquet"
+    # En ejecuciones versionadas se exige
+    # el dataset particionado oficial.
+    if gold_dirs is not None:
 
-    if (
+        if not (
+            ratings_directory.is_dir()
+            and any(
+                ratings_directory.glob(
+                    "part_*.parquet"
+                )
+            )
+        ):
+            raise FileNotFoundError(
+                "Gold ML requiere fact_rating "
+                "particionado en el run_id seleccionado."
+            )
+
+        fact_rating_path = ratings_directory
+
+    elif (
         ratings_directory.is_dir()
-        and any(ratings_directory.glob("part_*.parquet"))
+        and any(
+            ratings_directory.glob(
+                "part_*.parquet"
+            )
+        )
     ):
         fact_rating_path = ratings_directory
 
     elif ratings_file.is_file():
-        # Compatibilidad temporal con versiones antiguas.
+
+        # Compatibilidad temporal exclusiva
+        # para el almacenamiento antiguo.
         fact_rating_path = ratings_file
 
     else:
         raise FileNotFoundError(
-            "No se encontró fact_rating particionado "
-            "ni fact_rating.parquet."
+            "No se encontró fact_rating."
         )
 
-
-    if not dim_movie_path.exists():
+    if not dim_movie_path.is_file():
         raise FileNotFoundError(
             f"No se encontró: {dim_movie_path}"
-        )
-
-    if not fact_rating_path.exists():
-        raise FileNotFoundError(
-            f"No se encontró: {fact_rating_path}"
         )
 
     dim_movie = pd.read_parquet(
@@ -103,6 +257,58 @@ def build_content_based_features(
         subset=["movie_id"]
     )
 
+    
+    # Verificar que el catálogo tenga al menos
+    # alguna característica semántica aprovechable.
+    columnas_semanticas = [
+        "genres",
+        "tmdb_genres",
+        "keywords",
+        "director",
+        "actors",
+        "overview",
+    ]
+
+    disponibles = [
+        columna
+        for columna in columnas_semanticas
+        if columna in df.columns
+    ]
+
+    if not disponibles:
+        raise ValueError(
+            "Gold ML no contiene columnas "
+            "semánticas para Content-Based."
+        )
+
+    def tiene_contenido(valor):
+
+        if valor is None:
+            return False
+
+        if isinstance(valor, (list, tuple, set)):
+            return any(
+                isinstance(item, str) and item.strip()
+                for item in valor
+            )
+
+        if isinstance(valor, str):
+            return bool(valor.strip())
+
+        return False
+
+    hay_contenido = any(
+        df[columna].map(tiene_contenido).any()
+        for columna in disponibles
+    )
+
+    if not hay_contenido:
+        raise ValueError(
+            "Gold ML no contiene información "
+            "semántica aprovechable."
+        )
+
+    
     return df
 
 ### FUNCION QUE GENERA DATASET UTILIADO POR FILTRADO COLABORATIVO
@@ -220,15 +426,54 @@ def save_partitioned_parquet(
     return rutas
 
 ### FUNCION QUE ORQUESTA
+def run_gold_analytics_to_ml(
+    gold_dirs: dict[str, Path] | None = None,
+):
 
-def run_gold_analytics_to_ml():
 
     print("=" * 60)
     print("GOLD ANALYTICS -> GOLD ML")
     print("=" * 60)
 
-    analytics = load_gold_analytics()
+    
+    # Seleccionar la ejecución Gold de origen.
+    # Mantener compatibilidad con las llamadas
+    # anteriores mientras migramos el pipeline.
 
+    if gold_dirs is not None:
+        analytics = load_gold_analytics(
+            gold_dirs=gold_dirs,
+        )
+    else:
+        analytics = load_gold_analytics()
+
+
+    # Seleccionar los directorios de salida ML.
+    # Las ejecuciones versionadas conservan
+    # sus resultados dentro del mismo run_id.
+
+    if gold_dirs is not None:
+
+        validate_gold_run_directories(
+            gold_dirs=gold_dirs,
+        )
+
+        content_dir = Path(
+            gold_dirs["ml_content"]
+        )
+
+        collaborative_dir = Path(
+            gold_dirs["ml_collaborative"]
+        )
+
+    else:
+
+        # Compatibilidad temporal con las rutas
+        # utilizadas antes del versionado.
+        content_dir = GOLD_ML_CONTENT_DIR
+        collaborative_dir = GOLD_ML_COLLABORATIVE_DIR
+
+    
     print(
         "Películas:",
         len(analytics["dim_movie"])
@@ -267,21 +512,25 @@ def run_gold_analytics_to_ml():
 
     rutas = {}
 
+
     rutas["content_based_features"] = (
         save_ml_dataset(
             content_based_features,
-            GOLD_ML_CONTENT_DIR,
+            content_dir,
             "content_based_features.parquet",
         )
     )
 
+
+
     rutas["collaborative_interactions"] = (
         save_partitioned_parquet(
             collaborative_interactions,
-            GOLD_ML_COLLABORATIVE_DIR,
+            collaborative_dir,
             "collaborative_interactions",
         )
     )
+
 
     print("\nDatasets ML generados:")
 
