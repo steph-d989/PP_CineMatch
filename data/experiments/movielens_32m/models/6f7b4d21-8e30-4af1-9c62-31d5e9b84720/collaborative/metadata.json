@@ -1,0 +1,7 @@
+{
+  "model_type": "collaborative_truncated_svd",
+  "run_id": "6f7b4d21-8e30-4af1-9c62-31d5e9b84720",
+  "total_users": 300,
+  "total_movies": 7412,
+  "n_factors": 50
+}

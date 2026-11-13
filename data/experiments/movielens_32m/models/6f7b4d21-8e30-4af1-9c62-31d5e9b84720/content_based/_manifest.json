@@ -1,0 +1,31 @@
+{
+  "model_type": "content_based_tfidf",
+  "algorithm": "sha256",
+  "total_files": 4,
+  "files": [
+    {
+      "component": "catalog",
+      "path": "catalog.parquet",
+      "bytes": 218292,
+      "sha256": "1cf96840299a270d889abd92c23d7193097ec239af2aa7185e9b1bc44944fc86"
+    },
+    {
+      "component": "metadata",
+      "path": "metadata.json",
+      "bytes": 86364,
+      "sha256": "225c91e44ca1724bdcb4c4b917795e460e1db802432487168cb0cdeaf223bbea"
+    },
+    {
+      "component": "matrix",
+      "path": "tfidf_matrix.npz",
+      "bytes": 101579,
+      "sha256": "4edff63b064333a8993e4c7631df78592b9c04acfdddb518c44c92fce98a6a83"
+    },
+    {
+      "component": "vectorizer",
+      "path": "vectorizer.joblib",
+      "bytes": 8213,
+      "sha256": "8ce68940a31962d63ddccfc1b792f96abfa27c2c0671a1fd4f22422ff38e06e0"
+    }
+  ]
+}

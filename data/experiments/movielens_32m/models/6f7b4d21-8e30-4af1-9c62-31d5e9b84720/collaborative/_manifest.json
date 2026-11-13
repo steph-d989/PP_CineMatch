@@ -1,0 +1,19 @@
+{
+  "model_type": "collaborative_truncated_svd",
+  "algorithm": "sha256",
+  "total_files": 2,
+  "files": [
+    {
+      "component": "factors",
+      "path": "factors.npz",
+      "bytes": 2272804,
+      "sha256": "c59117e1ada32d17422744deecdb6fbf432a6351f15b13e44c558f7bc771a62d"
+    },
+    {
+      "component": "metadata",
+      "path": "metadata.json",
+      "bytes": 172,
+      "sha256": "f20475bed72cc18a66e9bf7db2186571206227b862f12708abe92908dd9c58d1"
+    }
+  ]
+}
